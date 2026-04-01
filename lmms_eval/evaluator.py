@@ -786,6 +786,74 @@ def _run_generate_until_agentic(
     return responses
 
 
+def _gather_object_batched(obj_list, batch_size, world_size, rank, dst=0):
+    """Batch gather objects to avoid OOM with large lists.
+    
+    Args:
+        obj_list: List of objects to gather from this rank
+        batch_size: Number of items to gather in each batch
+        world_size: Total number of ranks
+        rank: Current rank
+        dst: Destination rank
+        
+    Returns:
+        On dst rank: Flattened list of all objects from all ranks
+        On other ranks: None
+    """
+    if world_size <= 1:
+        return obj_list if rank == dst else None
+    
+    # Get local batch count
+    local_total = len(obj_list)
+    local_num_batches = (local_total + batch_size - 1) // batch_size if local_total > 0 else 0
+    
+    # Synchronize max batch count across all ranks to ensure all participate
+    # in the same number of gather_object calls
+    max_batches_tensor = torch.tensor([local_num_batches], dtype=torch.int32)
+    if torch.cuda.is_available():
+        max_batches_tensor = max_batches_tensor.cuda()
+    dist.all_reduce(max_batches_tensor, op=dist.ReduceOp.MAX)
+    max_num_batches = int(max_batches_tensor.item())
+    
+    if max_num_batches == 0:
+        return [] if rank == dst else None
+    
+    gathered_batches = [] if rank == dst else None
+    
+    for batch_idx in range(max_num_batches):
+        # Get batch for this rank (empty list if beyond local data)
+        start_idx = batch_idx * batch_size
+        if start_idx < local_total:
+            end_idx = min(start_idx + batch_size, local_total)
+            batch = obj_list[start_idx:end_idx]
+        else:
+            batch = []  # Empty batch for ranks that have no more data
+        
+        # Gather this batch
+        batch_gather_list = [None] * world_size if rank == dst else None
+        torch.distributed.gather_object(
+            obj=batch,
+            object_gather_list=batch_gather_list,
+            dst=dst,
+        )
+        
+        if rank == dst:
+            # Flatten batch results from all ranks (filter out empty lists)
+            batch_flat = list(itertools.chain.from_iterable(
+                rank_items for rank_items in batch_gather_list 
+                if rank_items is not None and len(rank_items) > 0
+            ))
+            if batch_flat:  # Only append non-empty batches
+                gathered_batches.append(batch_flat)
+        
+        # Barrier to synchronize before next batch
+        dist.barrier()
+    
+    if rank == dst:
+        return list(itertools.chain.from_iterable(gathered_batches))
+    return None
+
+
 @positional_deprecated
 def evaluate(
     lm,
@@ -1207,23 +1275,15 @@ def evaluate(
 
     if WORLD_SIZE > 1:
         # if multigpu, then gather data across all ranks to rank 0
-        # first gather logged samples across all ranks
+        # first gather logged samples across all ranks (batched to avoid OOM)
         for task_output in eval_tasks:
             if log_samples:
-                # for task_name, task_samples in list(samples.items()):
-                full_samples = [None] * WORLD_SIZE if RANK == 0 else None
-                per_rank_samples = []
-                for sample in task_output.logged_samples:
-                    per_rank_samples.append(sample)
-
-                torch.distributed.gather_object(
-                    obj=per_rank_samples,
-                    object_gather_list=full_samples,
-                    dst=0,
-                )
-
+                # Use batched gather to avoid OOM with large samples containing media data
+                per_rank_samples = list(task_output.logged_samples)
+                gathered_samples = _gather_object_batched(per_rank_samples, batch_size=50, world_size=WORLD_SIZE, rank=RANK, dst=0)
+                
                 if RANK == 0:
-                    task_output.logged_samples = list(itertools.chain.from_iterable(full_samples))
+                    task_output.logged_samples = gathered_samples
 
             # then collect metrics across all ranks
             # All ranks must iterate over metric keys in the SAME order,
@@ -1257,14 +1317,10 @@ def evaluate(
                 else:
                     pre_gather = []
 
-                metric_list = [None] * WORLD_SIZE if RANK == 0 else None
-                torch.distributed.gather_object(
-                    obj=pre_gather,
-                    object_gather_list=metric_list,
-                    dst=0,
-                )
+                # Use batched gather to avoid OOM with large metric lists
+                gathered_metrics = _gather_object_batched(pre_gather, batch_size=100, world_size=WORLD_SIZE, rank=RANK, dst=0)
                 if RANK == 0:
-                    task_output.sample_metrics[metrics] = list(itertools.chain.from_iterable(metric_list))
+                    task_output.sample_metrics[metrics] = gathered_metrics
 
             # gather per_sample_metrics for stability metrics (same canonical ordering)
             all_ps_keys = list(task_output.per_sample_metrics.keys())
@@ -1294,14 +1350,10 @@ def evaluate(
                 else:
                     pre_gather = []
 
-                metric_list = [None] * WORLD_SIZE if RANK == 0 else None
-                torch.distributed.gather_object(
-                    obj=pre_gather,
-                    object_gather_list=metric_list,
-                    dst=0,
-                )
+                # Use batched gather to avoid OOM with large metric lists
+                gathered_metrics = _gather_object_batched(pre_gather, batch_size=100, world_size=WORLD_SIZE, rank=RANK, dst=0)
                 if RANK == 0:
-                    task_output.per_sample_metrics[metrics] = list(itertools.chain.from_iterable(metric_list))
+                    task_output.per_sample_metrics[metrics] = gathered_metrics
 
         dist.barrier()  # Ensure all processes are synced before proceeding
 
