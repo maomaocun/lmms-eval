@@ -1,3 +1,4 @@
+import itertools
 import os
 import time
 from typing import Dict, List, Optional, Union
@@ -13,22 +14,35 @@ from ..protocol import Request, Response, ServerConfig
 
 
 class OpenAIProvider(ServerInterface):
-    """OpenAI API implementation of the Judge interface"""
+    """OpenAI API implementation of the Judge interface.
+
+    Supports multiple backends via semicolon-separated URLs in OPENAI_API_URL,
+    e.g. http://localhost:8000/v1;http://localhost:8001/v1
+    """
 
     def __init__(self, config: Optional[ServerConfig] = None):
         super().__init__(config)
         self.api_key = os.getenv("OPENAI_API_KEY", "")
-        self.api_url = os.getenv("OPENAI_API_URL", "https://api.openai.com/v1/chat/completions/v1")
+        raw_api_url = os.getenv("OPENAI_API_URL", "https://api.openai.com/v1/chat/completions/v1")
+        self.api_urls = [u.strip() for u in raw_api_url.split(";") if u.strip()]
 
-        # Initialize OpenAI client
+        self.clients = []
+        self.use_client = False
         try:
             from openai import OpenAI
 
-            self.client = OpenAI(api_key=self.api_key, base_url=self.api_url)
+            for url in self.api_urls:
+                self.clients.append(OpenAI(api_key=self.api_key, base_url=url))
             self.use_client = True
         except ImportError:
             eval_logger.warning("OpenAI client not available, falling back to requests")
-            self.use_client = False
+
+        self._client_cycle = itertools.cycle(self.clients) if self.clients else None
+
+    def _next_client(self):
+        if self._client_cycle is None:
+            raise RuntimeError("No OpenAI clients available")
+        return next(self._client_cycle)
 
     def is_available(self) -> bool:
         return bool(self.api_key)
@@ -59,17 +73,21 @@ class OpenAIProvider(ServerInterface):
         if config.response_format == "json":
             payload["response_format"] = {"type": "json_object"}
 
-        # Make API call with retries
+        # Make API call with retries (across URLs for resilience)
+        last_exception = None
+        urls_attempted = set()
         for attempt in range(config.num_retries):
             try:
                 if self.use_client:
-                    response = self.client.chat.completions.create(**payload)
+                    client = self._next_client()
+                    response = client.chat.completions.create(**payload)
                     content = response.choices[0].message.content
                     model_used = response.model
                     usage = response.usage.model_dump() if hasattr(response.usage, "model_dump") else None
                     raw_response = response
                 else:
-                    response = self._make_request(payload, config.timeout)
+                    url = self.api_urls[attempt % len(self.api_urls)]
+                    response = self._make_request(payload, config.timeout, url)
                     content = response["choices"][0]["message"]["content"]
                     model_used = response["model"]
                     usage = response.get("usage")
@@ -98,21 +116,23 @@ class OpenAIProvider(ServerInterface):
                 return Response(content=content.strip(), model_used=model_used, usage=usage, raw_response=raw_response)
 
             except Exception as e:
+                last_exception = e
                 eval_logger.warning(f"Attempt {attempt + 1}/{config.num_retries} failed: {str(e)}")
                 if attempt < config.num_retries - 1:
                     time.sleep(config.retry_delay)
                 else:
                     eval_logger.error(f"All {config.num_retries} attempts failed")
-                    raise
+                    raise last_exception
 
-    def _make_request(self, payload: Dict, timeout: int) -> Dict:
+    def _make_request(self, payload: Dict, timeout: int, url: Optional[str] = None) -> Dict:
         """Make HTTP request to OpenAI API"""
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
 
-        response = requests.post(self.api_url, headers=headers, json=payload, timeout=timeout)
+        target_url = url if url is not None else self.api_urls[0]
+        response = requests.post(target_url, headers=headers, json=payload, timeout=timeout)
         response.raise_for_status()
         return response.json()
 

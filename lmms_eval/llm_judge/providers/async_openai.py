@@ -13,22 +13,39 @@ from .openai import OpenAIProvider
 
 
 class AsyncOpenAIProvider(AsyncServerInterface):
-    """Async OpenAI API implementation of the Judge interface"""
+    """Async OpenAI API implementation of the Judge interface.
+
+    Supports multiple backends via semicolon-separated URLs in OPENAI_API_URL,
+    e.g. http://localhost:8000/v1;http://localhost:8001/v1
+    """
 
     def __init__(self, config: Optional[ServerConfig] = None):
         super().__init__(config)
         self.api_key = os.getenv("OPENAI_API_KEY", "")
-        self.api_url = os.getenv("OPENAI_API_URL", "https://api.openai.com/v1/chat/completions")
+        raw_api_url = os.getenv("OPENAI_API_URL", "https://api.openai.com/v1/chat/completions")
+        self.api_urls = [u.strip() for u in raw_api_url.split(";") if u.strip()]
 
-        # Try to use async OpenAI client if available
+        self.async_clients = []
         self.use_async_client = False
         try:
             from openai import AsyncOpenAI
 
-            self.async_client = AsyncOpenAI(api_key=self.api_key)
+            for url in self.api_urls:
+                self.async_clients.append(AsyncOpenAI(api_key=self.api_key, base_url=url))
             self.use_async_client = True
         except ImportError:
             eval_logger.warning("AsyncOpenAI client not available, using aiohttp")
+
+        self._client_idx = 0
+        self._client_lock = asyncio.Lock()
+
+    async def _next_client(self):
+        if not self.async_clients:
+            raise RuntimeError("No AsyncOpenAI clients available")
+        async with self._client_lock:
+            client = self.async_clients[self._client_idx]
+            self._client_idx = (self._client_idx + 1) % len(self.async_clients)
+            return client
 
     def is_available(self) -> bool:
         return bool(self.api_key)
@@ -60,17 +77,20 @@ class AsyncOpenAIProvider(AsyncServerInterface):
             payload["response_format"] = {"type": "json_object"}
 
         # Make API call with retries
+        last_exception = None
         async with self.semaphore:
             for attempt in range(config.num_retries):
                 try:
                     if self.use_async_client:
-                        response = await self.async_client.chat.completions.create(**payload)
+                        client = await self._next_client()
+                        response = await client.chat.completions.create(**payload)
                         content = response.choices[0].message.content
                         model_used = response.model
                         usage = response.usage.model_dump() if hasattr(response.usage, "model_dump") else None
                         raw_response = response
                     else:
-                        response = await self._make_async_request(payload, config.timeout)
+                        url = self.api_urls[attempt % len(self.api_urls)]
+                        response = await self._make_async_request(payload, config.timeout, url)
                         content = response["choices"][0]["message"]["content"]
                         model_used = response["model"]
                         usage = response.get("usage")
@@ -99,22 +119,24 @@ class AsyncOpenAIProvider(AsyncServerInterface):
                     return Response(content=content.strip(), model_used=model_used, usage=usage, raw_response=raw_response)
 
                 except Exception as e:
+                    last_exception = e
                     eval_logger.warning(f"Attempt {attempt + 1}/{config.num_retries} failed: {str(e)}")
                     if attempt < config.num_retries - 1:
                         await asyncio.sleep(config.retry_delay)
                     else:
                         eval_logger.error(f"All {config.num_retries} attempts failed")
-                        raise
+                        raise last_exception
 
-    async def _make_async_request(self, payload: Dict, timeout: int) -> Dict:
+    async def _make_async_request(self, payload: Dict, timeout: int, url: Optional[str] = None) -> Dict:
         """Make async HTTP request to OpenAI API"""
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
 
+        target_url = url if url is not None else self.api_urls[0]
         async with aiohttp.ClientSession() as session:
-            async with session.post(self.api_url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=timeout)) as response:
+            async with session.post(target_url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=timeout)) as response:
                 response.raise_for_status()
                 return await response.json()
 

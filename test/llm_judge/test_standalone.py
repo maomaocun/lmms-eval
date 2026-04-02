@@ -1,0 +1,425 @@
+"""Tests for the standalone judge module.
+
+This module tests the JudgeRunner class and related functionality
+for judging JSONL files without regeneration.
+"""
+
+import json
+import os
+import tempfile
+from pathlib import Path
+from unittest.mock import MagicMock, Mock, patch
+
+import pytest
+
+
+# Skip all tests if judge dependencies are not available
+try:
+    from lmms_eval.llm_judge.standalone import JudgeRunner
+    JUDGE_AVAILABLE = True
+except ImportError:
+    JUDGE_AVAILABLE = False
+
+
+pytestmark = pytest.mark.skipif(not JUDGE_AVAILABLE, reason="Judge dependencies not available")
+
+
+@pytest.fixture
+def sample_jsonl(tmp_path):
+    """Create a sample JSONL file for testing."""
+    samples = [
+        {
+            "doc_id": 0,
+            "doc": {
+                "question": "What is 2+2?",
+                "answer": "4",
+                "options": ["2", "3", "4", "5"],
+            },
+            "filtered_resps": "The answer is 4.",
+            "target": "4",
+        },
+        {
+            "doc_id": 1,
+            "doc": {
+                "question": "What is the capital of France?",
+                "answer": "Paris",
+            },
+            "filtered_resps": "Paris",
+            "target": "Paris",
+        },
+        {
+            "doc_id": 2,
+            "doc": {
+                "question": "Solve for x: 2x = 10",
+                "answer": "5",
+            },
+            "filtered_resps": "x = 5",
+            "target": "5",
+        },
+    ]
+    
+    file_path = tmp_path / "test_samples.jsonl"
+    with open(file_path, "w") as f:
+        for sample in samples:
+            f.write(json.dumps(sample) + "\n")
+    
+    return file_path
+
+
+@pytest.fixture
+def mock_task():
+    """Create a mock task for testing."""
+    task = MagicMock()
+    task.config.process_results = MagicMock(return_value={
+        "acc_score": 1.0,
+        "format_score": 1.0,
+    })
+    return task
+
+
+class TestJudgeRunner:
+    """Tests for the JudgeRunner class."""
+    
+    def test_init(self):
+        """Test JudgeRunner initialization."""
+        runner = JudgeRunner(
+            judge_mode="auto",
+            judge_model="gpt-4o-mini",
+            parallel=4,
+        )
+        
+        assert runner.judge_mode == "auto"
+        assert runner.judge_model == "gpt-4o-mini"
+        assert runner.parallel == 4
+        assert runner._judge_provider is None
+    
+    def test_init_with_env_vars(self, monkeypatch):
+        """Test initialization with environment variables."""
+        monkeypatch.setenv("JUDGE_API_KEY", "test-key")
+        monkeypatch.setenv("JUDGE_BASE_URL", "https://test.api.com")
+        
+        runner = JudgeRunner()
+        
+        assert runner.judge_api_key == "test-key"
+        assert runner.judge_base_url == "https://test.api.com"
+    
+    def test_load_jsonl(self, sample_jsonl):
+        """Test loading JSONL file."""
+        runner = JudgeRunner()
+        samples = runner._load_jsonl(sample_jsonl)
+        
+        assert len(samples) == 3
+        assert samples[0]["doc_id"] == 0
+        assert samples[0]["doc"]["question"] == "What is 2+2?"
+    
+    def test_load_jsonl_not_found(self):
+        """Test loading non-existent file."""
+        runner = JudgeRunner()
+        
+        with pytest.raises(FileNotFoundError):
+            runner._load_jsonl(Path("/nonexistent/file.jsonl"))
+    
+    def test_load_jsonl_invalid_json(self, tmp_path):
+        """Test loading file with invalid JSON."""
+        file_path = tmp_path / "invalid.jsonl"
+        with open(file_path, "w") as f:
+            f.write('{"valid": true}\n')
+            f.write('invalid json\n')
+            f.write('{"valid": false}\n')
+        
+        runner = JudgeRunner()
+        samples = runner._load_jsonl(file_path)
+        
+        assert len(samples) == 2  # One line should be skipped
+    
+    def test_extract_question(self):
+        """Test question extraction from doc."""
+        runner = JudgeRunner()
+        
+        # Test various field names
+        assert runner._extract_question({"question": "Q1"}) == "Q1"
+        assert runner._extract_question({"problem": "Q2"}) == "Q2"
+        assert runner._extract_question({"query": "Q3"}) == "Q3"
+        assert runner._extract_question({"query_wo": "Q4"}) == "Q4"
+        
+        # Test fallback
+        doc = {"other": "field"}
+        result = runner._extract_question(doc)
+        assert "other" in result
+    
+    def test_needs_llm_judge(self):
+        """Test detection of when LLM judge is needed."""
+        runner = JudgeRunner()
+        
+        # Should need LLM judge
+        assert runner._needs_llm_judge({"acc_score": 0}) is True
+        assert runner._needs_llm_judge({"accuracy": 0.0}) is True
+        assert runner._needs_llm_judge({"correct": False}) is True
+        assert runner._needs_llm_judge({"exact_match": 0}) is True
+        
+        # Should not need LLM judge
+        assert runner._needs_llm_judge({"acc_score": 1.0}) is False
+        assert runner._needs_llm_judge({"accuracy": 0.9}) is False
+        assert runner._needs_llm_judge({"correct": True}) is False
+        
+        # Edge cases
+        assert runner._needs_llm_judge({}) is False
+        assert runner._needs_llm_judge({"other_metric": 0}) is False
+    
+    def test_clean_for_json(self):
+        """Test JSON cleaning."""
+        runner = JudgeRunner()
+        
+        # Test basic types
+        assert runner._clean_for_json(123) == 123
+        assert runner._clean_for_json("str") == "str"
+        assert runner._clean_for_json(None) is None
+        
+        # Test nested dict
+        data = {
+            "a": 1,
+            "b": [1, 2, 3],
+            "c": {"d": "value"},
+        }
+        result = runner._clean_for_json(data)
+        assert result == data
+        
+        # Test non-serializable
+        obj = {"key": MagicMock()}
+        result = runner._clean_for_json(obj)
+        assert isinstance(result["key"], str)
+    
+    def test_save_results(self, tmp_path):
+        """Test saving results."""
+        runner = JudgeRunner()
+        
+        results = [
+            {"id": 1, "metrics": {"acc": 1.0}},
+            {"id": 2, "metrics": {"acc": 0.0}},
+        ]
+        output_path = tmp_path / "output.jsonl"
+        
+        runner.save_results(results, output_path)
+        
+        assert output_path.exists()
+        
+        # Verify contents
+        with open(output_path) as f:
+            lines = f.readlines()
+        assert len(lines) == 2
+        assert json.loads(lines[0])["id"] == 1
+    
+    @patch("lmms_eval.judge.standalone.TaskManager")
+    def test_load_task(self, mock_tm_class):
+        """Test loading task."""
+        mock_tm = MagicMock()
+        mock_task = MagicMock()
+        mock_tm.load_task_or_group.return_value = {"task": mock_task}
+        mock_tm_class.return_value = mock_tm
+        
+        runner = JudgeRunner()
+        task = runner._load_task("test_task")
+        
+        assert task == mock_task
+        mock_tm.load_task_or_group.assert_called_once_with("test_task")
+    
+    @patch("lmms_eval.judge.standalone.TaskManager")
+    def test_load_task_error(self, mock_tm_class):
+        """Test loading task with error."""
+        mock_tm = MagicMock()
+        mock_tm.load_task_or_group.side_effect = Exception("Task not found")
+        mock_tm_class.return_value = mock_tm
+        
+        runner = JudgeRunner()
+        
+        with pytest.raises(ValueError):
+            runner._load_task("invalid_task")
+
+
+class TestJudgeSample:
+    """Tests for the _judge_sample method."""
+    
+    def test_judge_sample_rule_mode(self, mock_task):
+        """Test judging in rule mode."""
+        runner = JudgeRunner(judge_mode="rule")
+        
+        sample = {
+            "doc_id": 0,
+            "doc": {"question": "Q", "answer": "A"},
+            "filtered_resps": "Response",
+        }
+        
+        result = runner._judge_sample(sample, mock_task, mock_task.config.process_results)
+        
+        assert "metrics" in result
+        assert result["judge_mode"] == "rule"
+        assert result["metrics"]["acc_score"] == 1.0
+    
+    def test_judge_sample_string_response(self, mock_task):
+        """Test judging with string response (not list)."""
+        runner = JudgeRunner(judge_mode="rule")
+        
+        sample = {
+            "doc_id": 0,
+            "doc": {"question": "Q", "answer": "A"},
+            "filtered_resps": "Response",  # String, not list
+        }
+        
+        result = runner._judge_sample(sample, mock_task, mock_task.config.process_results)
+        
+        assert "metrics" in result
+        # Should convert string to list before passing to process_results
+        mock_task.config.process_results.assert_called_once()
+        call_args = mock_task.config.process_results.call_args
+        assert call_args[0][1] == ["Response"]  # Should be wrapped in list
+    
+    def test_judge_sample_error_handling(self, mock_task):
+        """Test error handling in judging."""
+        runner = JudgeRunner(judge_mode="rule")
+        mock_task.config.process_results.side_effect = Exception("Processing error")
+        
+        sample = {
+            "doc_id": 0,
+            "doc": {"question": "Q", "answer": "A"},
+            "filtered_resps": "Response",
+        }
+        
+        result = runner._judge_sample(sample, mock_task, mock_task.config.process_results)
+        
+        assert "metrics" in result
+        assert result["judge_mode"] == "error"
+        assert "error" in result["metrics"]
+
+
+class TestJudgeFile:
+    """Tests for the judge_file method."""
+    
+    @patch("lmms_eval.judge.standalone.TaskManager")
+    def test_judge_file_success(self, mock_tm_class, sample_jsonl):
+        """Test successful judging of file."""
+        mock_tm = MagicMock()
+        mock_task = MagicMock()
+        mock_task.config.process_results = MagicMock(return_value={
+            "acc_score": 1.0,
+        })
+        mock_tm.load_task_or_group.return_value = {"task": mock_task}
+        mock_tm_class.return_value = mock_tm
+        
+        runner = JudgeRunner(judge_mode="rule")
+        results = runner.judge_file(sample_jsonl, "test_task")
+        
+        assert len(results) == 3
+        assert all("metrics" in r for r in results)
+        assert all(r["judge_mode"] == "rule" for r in results)
+    
+    @patch("lmms_eval.judge.standalone.TaskManager")
+    def test_judge_file_no_process_results(self, mock_tm_class, sample_jsonl):
+        """Test judging when task has no process_results."""
+        mock_tm = MagicMock()
+        mock_task = MagicMock()
+        mock_task.config.process_results = None
+        mock_tm.load_task_or_group.return_value = {"task": mock_task}
+        mock_tm_class.return_value = mock_tm
+        
+        runner = JudgeRunner()
+        
+        with pytest.raises(ValueError, match="no process_results"):
+            runner.judge_file(sample_jsonl, "test_task")
+
+
+class TestLLMJudge:
+    """Tests for LLM judge functionality."""
+    
+    @patch("lmms_eval.judge.standalone.ProviderFactory")
+    def test_init_judge_provider(self, mock_factory_class):
+        """Test initializing judge provider."""
+        mock_provider = MagicMock()
+        mock_factory_class.create_provider.return_value = mock_provider
+        
+        runner = JudgeRunner(
+            judge_mode="llm",
+            judge_model="gpt-4o",
+            judge_api_key="test-key",
+            judge_base_url="https://test.api.com",
+        )
+        
+        runner._init_judge_provider()
+        
+        assert runner._judge_provider == mock_provider
+        mock_factory_class.create_provider.assert_called_once()
+    
+    def test_init_judge_provider_no_key(self):
+        """Test initializing without API key."""
+        runner = JudgeRunner(judge_mode="llm")
+        runner.judge_api_key = None
+        
+        with pytest.raises(ValueError, match="JUDGE_API_KEY"):
+            runner._init_judge_provider()
+    
+    @patch("lmms_eval.judge.standalone.ProviderFactory")
+    def test_apply_llm_judge(self, mock_factory_class):
+        """Test applying LLM judge."""
+        mock_provider = MagicMock()
+        mock_provider.evaluate_binary.return_value = {
+            "result": 1,
+            "raw_response": "Correct",
+            "model": "gpt-4o",
+            "success": True,
+        }
+        mock_factory_class.create_provider.return_value = mock_provider
+        
+        runner = JudgeRunner(
+            judge_mode="llm",
+            judge_api_key="test-key",
+        )
+        
+        doc = {"question": "What is 2+2?", "answer": "4"}
+        results = ["The answer is 4."]
+        fallback = {"acc_score": 0}
+        
+        metrics = runner._apply_llm_judge(doc, results, fallback)
+        
+        assert metrics["llm_judge_score"] == 1
+        assert metrics["llm_judge_raw"] == "Correct"
+        assert metrics["llm_judge_model"] == "gpt-4o"
+        assert metrics["acc_score"] == 0  # Fallback preserved
+        
+        mock_provider.evaluate_binary.assert_called_once_with(
+            question="What is 2+2?",
+            answer="4",
+            prediction="The answer is 4.",
+            output_format="0/1",
+        )
+    
+    @patch("lmms_eval.judge.standalone.ProviderFactory")
+    def test_apply_llm_judge_no_answer(self, mock_factory_class):
+        """Test LLM judge when no ground truth answer."""
+        runner = JudgeRunner(judge_api_key="test-key")
+        runner._judge_provider = MagicMock()
+        
+        doc = {"question": "What is 2+2?"}  # No answer field
+        results = ["The answer is 4."]
+        
+        metrics = runner._apply_llm_judge(doc, results, {})
+        
+        assert metrics["llm_judge_skipped"] is True
+        runner._judge_provider.evaluate_binary.assert_not_called()
+    
+    @patch("lmms_eval.judge.standalone.ProviderFactory")
+    def test_apply_llm_judge_error(self, mock_factory_class):
+        """Test LLM judge when API fails."""
+        mock_provider = MagicMock()
+        mock_provider.evaluate_binary.side_effect = Exception("API Error")
+        mock_factory_class.create_provider.return_value = mock_provider
+        
+        runner = JudgeRunner(judge_api_key="test-key")
+        
+        doc = {"question": "Q", "answer": "A"}
+        results = ["Response"]
+        fallback = {"acc_score": 0}
+        
+        metrics = runner._apply_llm_judge(doc, results, fallback)
+        
+        assert metrics["llm_judge_error"] == "API Error"
+        assert metrics["llm_judge_failed"] is True
+        assert metrics["acc_score"] == 0  # Fallback preserved

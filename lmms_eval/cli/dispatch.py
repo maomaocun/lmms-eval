@@ -14,7 +14,7 @@ import sys
 # These are the known subcommand names.  If argv[1] is NOT one of these
 # and starts with '-', we assume the legacy flat-args invocation and
 # route everything to `eval`.
-_SUBCOMMANDS = {"eval", "tasks", "models", "ui", "serve", "power", "version", "tui", "mcp"}
+_SUBCOMMANDS = {"eval", "tasks", "models", "ui", "serve", "power", "version", "tui", "mcp", "judge", "aggregate"}
 
 # Help banner shown when no args are given (before heavy imports).
 _BANNER = """
@@ -28,6 +28,7 @@ _BANNER = """
 \u2502  lmms-eval ui     [--port 8000]           Launch Web UI       \u2502
 \u2502  lmms-eval serve  [--host H --port P]     HTTP eval server    \u2502
 │  lmms-eval mcp    [--transport stdio]     MCP server (agents) │
+│  lmms-eval aggregate -i results.jsonl     Aggregate judged    │
 \u2502  lmms-eval power  [--effect-size 0.03]    Power analysis      \u2502
 \u2502  lmms-eval version                        Version info        \u2502
 \u2502                                                              \u2502
@@ -64,6 +65,16 @@ def _build_parser() -> argparse.ArgumentParser:
     add_power_parser(sub)
     add_version_parser(sub)
     add_mcp_parser(sub)
+
+    # ---- judge subcommand ----
+    from lmms_eval.cli.judge_cmd import add_judge_parser
+
+    add_judge_parser(sub)
+
+    # ---- aggregate subcommand ----
+    from lmms_eval.cli.aggregate_cmd import add_aggregate_parser
+
+    add_aggregate_parser(sub)
 
     # ---- eval subcommand (placeholder, actual parsing done by legacy code) ----
     eval_p = sub.add_parser(
