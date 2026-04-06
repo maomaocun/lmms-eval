@@ -1,6 +1,7 @@
 import abc
 import ast
 import copy
+import fnmatch
 import inspect
 import itertools
 import json
@@ -13,6 +14,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from functools import lru_cache, partial
 from glob import glob
+from pathlib import Path
 from typing import (
     Any,
     Iterator,
@@ -953,6 +955,96 @@ class ConfigurableTask(Task):
                     eval_logger.warning(f"[Task: {self._config.task}] metric {metric_name} is defined, but higher_is_better is not. " f"using default " f"higher_is_better={is_higher_better(metric_name)}")
                     self._higher_is_better[metric_name] = is_higher_better(metric_name)
 
+    def _ensure_data_files_cache_compat(self, dataset_kwargs, cache_dir):
+        """
+        When `data_files` is used, different `datasets` versions may compute
+        different config-id hashes for the same YAML config.  In offline mode
+        that causes ``Couldn't find cache`` errors because the cache directory
+        name no longer matches.  This helper creates a symlink from the *new*
+        expected directory name to the *old* existing one so that
+        ``datasets.load_dataset`` can find its cache again.
+        """
+        if not dataset_kwargs or "data_files" not in dataset_kwargs:
+            return
+
+        data_files = dataset_kwargs["data_files"]
+        config_name = self.DATASET_NAME or "default"
+
+        try:
+            from datasets.builder import BuilderConfig
+            from datasets.naming import camelcase_to_snakecase
+        except Exception:
+            return
+
+        load_kwargs = dict(dataset_kwargs)
+        load_kwargs.pop("cache_dir", None)
+        load_kwargs.pop("revision", None)
+
+        expected_config_id = BuilderConfig(config_name).create_config_id(
+            config_kwargs=load_kwargs, custom_features=None
+        )
+
+        dataset_name = self.DATASET_PATH
+        if not dataset_name or "/" not in dataset_name:
+            return
+
+        namespace_and_ds = dataset_name.split("/")
+        namespace_and_ds[-1] = camelcase_to_snakecase(namespace_and_ds[-1])
+        cached_relative_path = "___".join(namespace_and_ds)
+        cache_root = os.path.join(cache_dir, cached_relative_path)
+
+        if not os.path.isdir(cache_root):
+            return
+
+        expected_dir = os.path.join(cache_root, expected_config_id)
+        if os.path.exists(expected_dir) or os.path.islink(expected_dir):
+            return
+
+        requested_files = set()
+        df = data_files
+        if isinstance(df, str):
+            requested_files.add(os.path.basename(df))
+        elif isinstance(df, (list, tuple)):
+            requested_files.update(os.path.basename(f) for f in df)
+        elif isinstance(df, dict):
+            for v in df.values():
+                if isinstance(v, str):
+                    requested_files.add(os.path.basename(v))
+                elif isinstance(v, (list, tuple)):
+                    requested_files.update(os.path.basename(f) for f in v)
+
+        def _files_match(req_set, cache_set):
+            if not req_set:
+                return False
+            if req_set == cache_set:
+                return True
+            # Support glob patterns (e.g. "*.parquet")
+            for req in req_set:
+                if any(fnmatch.fnmatch(cf, req) for cf in cache_set):
+                    return True
+            return False
+
+        for old_config_dir in glob(os.path.join(cache_root, "default-*")):
+            if os.path.islink(old_config_dir):
+                continue
+            info_paths = glob(os.path.join(old_config_dir, "*", "*", "dataset_info.json"))
+            if not info_paths:
+                continue
+            try:
+                with open(info_paths[0], "r", encoding="utf-8") as f:
+                    info = json.load(f)
+                checksums = info.get("download_checksums", {})
+                cached_files = {os.path.basename(url) for url in checksums.keys()}
+                if _files_match(requested_files, cached_files):
+                    os.symlink(os.path.basename(old_config_dir), expected_dir)
+                    eval_logger.info(
+                        f"[CacheCompat] task={self.config.task}: linked {expected_config_id} -> "
+                        f"{os.path.basename(old_config_dir)} to bridge datasets version hash drift."
+                    )
+                    return
+            except Exception:
+                continue
+
     @retry(stop=(stop_after_attempt(5) | stop_after_delay(60)), wait=wait_fixed(2))
     def download(self, dataset_kwargs=None) -> None:
         # If the dataset is a video dataset,
@@ -1142,6 +1234,10 @@ class ConfigurableTask(Task):
         else:
             load_dataset_kwargs = dict(dataset_kwargs) if dataset_kwargs is not None else {}
             load_dataset_cache_dir = load_dataset_kwargs.pop("cache_dir", resolved_dataset_cache_dir)
+            self._ensure_data_files_cache_compat(load_dataset_kwargs, load_dataset_cache_dir)
+            import pickle
+            print(f"[DEBUG_LMMS_EVAL] task={self.config.task} path={self.DATASET_PATH} name={self.DATASET_NAME} kwargs={load_dataset_kwargs}")
+            print(f"[DEBUG_LMMS_EVAL] download_config local_files_only={download_config.local_files_only} cache_dir={load_dataset_cache_dir}")
             self.dataset = datasets.load_dataset(
                 path=self.DATASET_PATH,
                 name=self.DATASET_NAME,
