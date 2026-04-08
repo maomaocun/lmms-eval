@@ -31,12 +31,11 @@ import filelock
 
 NUM_SECONDS_TO_SLEEP = 5
 API_TYPE = os.getenv("API_TYPE", "vllm_openai")
-# MODEL_VERSION = os.getenv("MODEL_VERSION", "gpt-4o-2024-08-06")
+MODEL_VERSION = os.getenv("MODEL_VERSION", "Qwen3-235B-A22B-Instruct-2507")
 FILE_NAME = os.getenv("FILE_NAME", "sfe_test.json")
 
 VLLM_API_KEY = os.environ.get("OPENAI_API_KEY", "EMPTY")
 VLLM_BASE_URL = os.environ.get("OPENAI_BASE_URL", "http://if-db6vyqsodagfgv3i-service:80/v1")
-MODEL_NAME = os.environ.get("OPENAI_MODEL_NAME", "Qwen3-235B-A22B-Instruct-2507")
 
 JUDGE_RULES = """You are a strict evaluator assessing answer correctness. You must score the model's prediction on a scale from 0 to 10, where 0 represents an entirely incorrect answer and 10 indicates a highly correct answer.
 # Input
@@ -75,9 +74,8 @@ if API_TYPE == "vllm_openai":
         base_url=VLLM_BASE_URL,
         api_key=VLLM_API_KEY,
     )
-    MODEL_VERSION = MODEL_NAME
 elif API_TYPE == "openai":
-    API_URL = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
+    API_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     API_KEY = os.getenv("OPENAI_API_KEY", "YOUR_API_KEY")
     client = OpenAI(base_url=API_URL, api_key=API_KEY)
 elif API_TYPE == "azure":

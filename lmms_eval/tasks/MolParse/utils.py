@@ -6,7 +6,7 @@ from openai import OpenAI
 
 VLLM_API_KEY = os.environ.get("OPENAI_API_KEY", "EMPTY")
 VLLM_BASE_URL = os.environ.get("OPENAI_BASE_URL", "http://if-db6vyqsodagfgv3i-service:80/v1")
-MODEL_NAME = os.environ.get("OPENAI_MODEL_NAME", "Qwen3-235B-A22B-Instruct-2507")
+MODEL_NAME = os.environ.get("MODEL_VERSION", "Qwen3-235B-A22B-Instruct-2507")
 
 client = OpenAI(
     base_url=VLLM_BASE_URL,
