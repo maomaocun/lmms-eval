@@ -1,6 +1,7 @@
 import ast
 import json
 import os
+from functools import lru_cache
 import random
 import re
 import time
@@ -26,6 +27,7 @@ from nltk.translate.meteor_score import meteor_score
 from lmms_eval.tasks._task_utils.file_utils import generate_submission_file
 
 import torch
+import filelock
 
 NUM_SECONDS_TO_SLEEP = 5
 API_TYPE = os.getenv("API_TYPE", "vllm_openai")
@@ -126,28 +128,26 @@ def images_ready():
         return False
 
 
+@lru_cache(maxsize=None)
 def ensure_sfe_images_downloaded():
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+    lock_path = os.path.join(DOWNLOAD_DIR, ".download.lock")
 
-    # 只有主进程负责下载
-    if is_main_process():
+    with filelock.FileLock(lock_path, timeout=-1):
         if not images_ready():
-            print("[rank0] images not ready, start downloading...")
+            print("[SFE] images not ready, start downloading...")
             snapshot_download(
                 repo_id="InternScience/SFE",
                 repo_type="dataset",
                 allow_patterns="images/*",
                 local_dir=DOWNLOAD_DIR,
+                tqdm_class=None,
             )
             Path(DONE_FLAG).write_text("ok", encoding="utf-8")
-            print("[rank0] download finished.")
+            print("[SFE] download finished.")
         else:
-            print("[rank0] images already exist, skip download.")
+            print("[SFE] images already exist, skip download.")
 
-    # 其他进程等待主进程下载完成
-    wait_for_everyone()
-
-    # barrier 之后再做一次校验，避免静默失败
     if not images_ready():
         raise RuntimeError(
             f"SFE images are not ready after synchronization: {LOCAL_PREFIX}"

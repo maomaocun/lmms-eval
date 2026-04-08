@@ -81,3 +81,8 @@ CLAUDE.md
 .opencode
 .ignored/
 .worktrees/
+
+# Large image datasets (not tracked)
+SFE_images/
+superchem_cn_images/
+superchem_en_images/

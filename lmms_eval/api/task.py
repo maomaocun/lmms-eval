@@ -465,6 +465,15 @@ class Task(abc.ABC):
             flattened_instances = [instance for instance_group in cached_instances for instance in instance_group]
 
             self._instances = flattened_instances
+
+            for instance in self._instances:
+                arguments = instance.arguments
+                if len(arguments) >= 3 and arguments[2] is None and hasattr(self, "doc_to_visual") and self.doc_to_visual is not None:
+                    arguments = (arguments[0], arguments[1], self.doc_to_visual, *arguments[3:])
+                if len(arguments) >= 2 and arguments[1] is None and hasattr(self, "doc_to_messages") and self.doc_to_messages is not None:
+                    arguments = (arguments[0], self.doc_to_messages, *arguments[2:])
+                instance.arguments = arguments
+
             return
 
         eval_logger.info(f"Building contexts for {self.config.task} on rank {rank}...")
