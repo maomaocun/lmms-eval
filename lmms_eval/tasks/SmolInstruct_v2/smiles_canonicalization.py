@@ -1,57 +1,120 @@
 from rdkit import Chem, RDLogger
 from rdchiral.chiral import copy_chirality
 from rdkit.Chem.AllChem import AssignStereochemistry
-import multiprocessing as mp
+import json
+import os
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm.auto import tqdm
 
 
 RDLogger.DisableLog('rdApp.*')
 
 
-def _canonicalize_chunk(args):
-    """Worker that canonicalizes a chunk of SMILES strings."""
-    items, return_none_for_error, fallback_to_original = args
-    results = []
-    for item in items:
-        try:
-            if item == '' or item is None:
-                results.append(None if return_none_for_error else "")
-                continue
-            results.append(canonicalize_molecule_smiles(item, return_none_for_error=return_none_for_error))
-        except Exception:
-            if return_none_for_error:
-                results.append(None)
-            else:
-                results.append(item if fallback_to_original else "")
-    return results
-
-
-def canonicalize_molecule_smiles_parallel(items, return_none_for_error=True, fallback_to_original=False, num_workers=8, chunk_size=10, timeout_per_chunk=300):
+def canonicalize_molecule_smiles_parallel(
+    items,
+    return_none_for_error=True,
+    fallback_to_original=False,
+    num_workers=16,
+    timeout_per_item=10,
+    chunk_size=100,
+):
     """
-    Batch-canonicalize SMILES strings using a subprocess pool.
-    Each chunk runs in a spawned worker so that an RDKit segfault
-    only kills that worker; failed chunks are filled with None/"".
+    Canonicalize SMILES strings using isolated subprocess workers.
+    Items are processed in chunks so that the overhead of spawning a process
+    is amortised.  If a chunk crashes (RDKit segfault) it is retried item-by-item
+    so that only the poison SMILES are lost.
     """
     if not items:
         return []
-    ctx = mp.get_context('spawn')
-    chunks = [items[i:i + chunk_size] for i in range(0, len(items), chunk_size)]
-    args = [(chunk, return_none_for_error, fallback_to_original) for chunk in chunks]
 
-    with ctx.Pool(processes=num_workers, maxtasksperchild=100) as pool:
-        async_results = [pool.apply_async(_canonicalize_chunk, (arg,)) for arg in args]
-        results = []
-        for ar in tqdm(async_results, total=len(async_results), desc="Canonicalizing chunks"):
+    worker_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "_canonicalize_worker.py",
+    )
+
+    def _run_chunk(chunk_items):
+        """Run a chunk of items in one subprocess."""
+        try:
+            proc = subprocess.run(
+                [sys.executable, worker_path],
+                input=json.dumps(
+                    {
+                        "items": chunk_items,
+                        "return_none_for_error": return_none_for_error,
+                        "fallback_to_original": fallback_to_original,
+                    }
+                ).encode(),
+                capture_output=True,
+                timeout=timeout_per_item * max(1, len(chunk_items) // 10),
+            )
+            if proc.returncode != 0:
+                raise RuntimeError("Worker crashed")
+            return json.loads(proc.stdout.decode())
+        except Exception:
+            raise
+
+    def _run_one(item):
+        """Fallback: run a single item in one subprocess."""
+        try:
+            proc = subprocess.run(
+                [sys.executable, worker_path],
+                input=json.dumps(
+                    {
+                        "items": [item],
+                        "return_none_for_error": return_none_for_error,
+                        "fallback_to_original": fallback_to_original,
+                    }
+                ).encode(),
+                capture_output=True,
+                timeout=timeout_per_item,
+            )
+            if proc.returncode != 0:
+                return (
+                    None
+                    if return_none_for_error
+                    else (item if fallback_to_original else "")
+                )
+            return json.loads(proc.stdout.decode())[0]
+        except Exception:
+            return (
+                None
+                if return_none_for_error
+                else (item if fallback_to_original else "")
+            )
+
+    # Build chunks
+    chunks = []
+    chunk_indices = []
+    for i in range(0, len(items), chunk_size):
+        chunks.append(items[i : i + chunk_size])
+        chunk_indices.append(list(range(i, min(i + chunk_size, len(items)))))
+
+    results = [None] * len(items)
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        # Submit chunks
+        future_to_chunk = {
+            executor.submit(_run_chunk, chunk): ci for ci, chunk in enumerate(chunks)
+        }
+
+        for future in tqdm(
+            as_completed(future_to_chunk),
+            total=len(chunks),
+            desc="Canonicalizing chunks",
+        ):
+            ci = future_to_chunk[future]
+            idxs = chunk_indices[ci]
             try:
-                results.extend(ar.get(timeout=timeout_per_chunk))
+                chunk_results = future.result()
+                for ii, res in zip(idxs, chunk_results):
+                    results[ii] = res
             except Exception:
-                # Worker crashed (likely RDKit segfault) or timed out -> fallback
-                chunk_len = len(args[len(results)][0])
-                if return_none_for_error:
-                    results.extend([None] * chunk_len)
-                else:
-                    results.extend([item if fallback_to_original else "" for item in args[len(results)][0]])
-    return results[:len(items)]
+                # Chunk crashed -> retry item-by-item
+                for ii in idxs:
+                    results[ii] = _run_one(items[ii])
+
+    return results
 
 
 def canonicalize(smiles, isomeric=False, canonical=True, kekulize=False):
@@ -136,7 +199,7 @@ def canonicalize_molecule_smiles(smiles, return_none_for_error=True, skip_mol=Fa
                 thing_smiles = Chem.MolToSmiles(thing_smiles, kekuleSmiles=False, isomericSmiles=isomeric)
                 assert thing_smiles is not None
                 can_in = thing_smiles
-                can_out = _safe_canonicalize(thing_smiles, isomeric=isomeric)
+                can_out = canonicalize(thing_smiles, isomeric=isomeric)
                 assert can_out is not None, can_in
                 thing_smiles = can_out
                 if kekulization:

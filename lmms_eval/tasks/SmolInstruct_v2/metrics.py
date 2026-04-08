@@ -16,7 +16,11 @@ from nltk.translate.meteor_score import meteor_score
 from rouge_score import rouge_scorer
 from sklearn.metrics import roc_auc_score, f1_score, precision_score, recall_score, matthews_corrcoef
 
-from .smiles_canonicalization import canonicalize_molecule_smiles, canonicalize_molecule_smiles_parallel, get_molecule_id
+from .smiles_canonicalization import (
+    canonicalize_molecule_smiles,
+    canonicalize_molecule_smiles_parallel,
+    get_molecule_id,
+)
 
 
 RDLogger.DisableLog('rdApp.*')
@@ -67,6 +71,8 @@ def judge_exact_match(pred_can_smiles_list, gold_can_smiles_list):
 
 
 def calculate_fingerprint_similarity(pred_mol_list, gold_mols_list, morgan_r=2):
+    if not pred_mol_list or not gold_mols_list:
+        return 0.0, 0.0, 0.0
     assert len(pred_mol_list) == len(gold_mols_list)
     MACCS_sims = []
     morgan_sims = []
@@ -82,9 +88,9 @@ def calculate_fingerprint_similarity(pred_mol_list, gold_mols_list, morgan_r=2):
         MACCS_sims.append(tmp_MACCS)
         RDK_sims.append(tmp_RDK)
         morgan_sims.append(tmp_morgan)
-    maccs_sims_score = np.mean(MACCS_sims)
-    rdk_sims_score = np.mean(RDK_sims)
-    morgan_sims_score = np.mean(morgan_sims)
+    maccs_sims_score = np.mean(MACCS_sims) if MACCS_sims else 0.0
+    rdk_sims_score = np.mean(RDK_sims) if RDK_sims else 0.0
+    morgan_sims_score = np.mean(morgan_sims) if morgan_sims else 0.0
     return maccs_sims_score, rdk_sims_score, morgan_sims_score
 
 
@@ -139,9 +145,12 @@ def calculate_smiles_metrics(
         dk_pred_smiles_list_dict[dk] = []
         dk_pred_no_answer_labels_dict[dk] = []
         dk_pred_invalid_labels_dict[dk] = []
+    # ------------------------------------------------------------------
+    # Canonicalize predictions (batched via isolated subprocess workers)
+    # ------------------------------------------------------------------
     flat_pred_items = []
-    flat_pred_indices = []
-    for sample_idx, pred_smiles_list in enumerate(preds_smiles_list):
+    flat_pred_indices = []   # (sample_idx, dk)
+    for si, pred_smiles_list in enumerate(preds_smiles_list):
         if pred_smiles_list is None:
             for dk in range(k):
                 dk_pred_no_answer_labels_dict[dk].append(True)
@@ -159,37 +168,33 @@ def calculate_smiles_metrics(
                 dk_pred_invalid_labels_dict[dk].append(False)  # placeholder
                 dk_pred_smiles_list_dict[dk].append(None)       # placeholder
                 flat_pred_items.append(item)
-                flat_pred_indices.append((sample_idx, dk))
+                flat_pred_indices.append((si, dk))
 
     if flat_pred_items:
-        flat_pred_results = canonicalize_molecule_smiles_parallel(flat_pred_items, return_none_for_error=True)
-        for (sample_idx, dk), res in zip(flat_pred_indices, flat_pred_results):
-            dk_pred_smiles_list_dict[dk][sample_idx] = res
-            if res is None:
-                dk_pred_invalid_labels_dict[dk][sample_idx] = True
+        flat_pred_results = canonicalize_molecule_smiles_parallel(
+            flat_pred_items, return_none_for_error=True
+        )
+        for (si, dk), can_smiles in zip(flat_pred_indices, flat_pred_results):
+            dk_pred_invalid_labels_dict[dk][si] = (can_smiles is None)
+            dk_pred_smiles_list_dict[dk][si] = can_smiles
 
+    # ------------------------------------------------------------------
+    # Canonicalize golds (batched via isolated subprocess workers)
+    # ------------------------------------------------------------------
     flat_gold_items = []
-    flat_gold_indices = []
-    new_list = [None] * num_all
-    for sample_idx, gold_smiles_list in enumerate(golds_smiles_list):
-        sample_gold_smiles_list = [None] * len(gold_smiles_list)
-        new_list[sample_idx] = sample_gold_smiles_list
-        for gold_idx, gold in enumerate(gold_smiles_list):
-            item = gold.strip()
-            flat_gold_items.append(item)
-            flat_gold_indices.append((sample_idx, gold_idx))
+    flat_gold_indices = []   # (sample_idx, gold_idx)
+    for si, gold_smiles_list in enumerate(golds_smiles_list):
+        for gi, gold in enumerate(gold_smiles_list):
+            flat_gold_items.append(gold.strip())
+            flat_gold_indices.append((si, gi))
 
+    new_list = [[] for _ in range(num_all)]
     if flat_gold_items:
-        flat_gold_results = canonicalize_molecule_smiles_parallel(flat_gold_items, return_none_for_error=False, fallback_to_original=True)
-        for (sample_idx, gold_idx), res in zip(flat_gold_indices, flat_gold_results):
-            new_list[sample_idx][gold_idx] = res if res != "" else flat_gold_items[len([i for i, idx in enumerate(flat_gold_indices) if idx == (sample_idx, gold_idx)]) - 1]
-            # simpler fallback: if empty string returned by failed chunk, use original
-            if res == "":
-                # find original index
-                orig_idx = flat_gold_indices.index((sample_idx, gold_idx))
-                new_list[sample_idx][gold_idx] = flat_gold_items[orig_idx]
-            else:
-                new_list[sample_idx][gold_idx] = res
+        flat_gold_results = canonicalize_molecule_smiles_parallel(
+            flat_gold_items, return_none_for_error=False, fallback_to_original=True
+        )
+        for (si, gi), can_smiles in zip(flat_gold_indices, flat_gold_results):
+            new_list[si].append(can_smiles)
     golds_smiles_list = new_list
 
     metric_results = {'num_all': num_all}
@@ -254,6 +259,12 @@ def calculate_smiles_metrics(
                 metric_results['num_t%d_intersection' % (dk + 1)] = tk_intersection_labels.sum().item()
         else:
             raise ValueError(metric)
+    
+    # Guard against NaN/None values in metric_results
+    for key in list(metric_results.keys()):
+        val = metric_results[key]
+        if val is None or (isinstance(val, (float, np.floating)) and np.isnan(val)):
+            metric_results[key] = 0.0
     
     return metric_results
 
