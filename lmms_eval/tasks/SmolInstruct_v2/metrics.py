@@ -437,7 +437,7 @@ def calculate_formula_metrics(
     return metric_results
 
 
-def calculate_text_metrics(pred_text_list, gold_text_list, text_model='/mnt/innovator/zyj/.cache/huggingface/hub/models--allenai--scibert_scivocab_uncased/snapshots/24f92d32b1bfb0bcaf9ab193ff3ad01e87732fc1', text_trunc_length=512):
+def calculate_text_metrics(pred_text_list, gold_text_list, text_model='allenai/scibert_scivocab_uncased', text_trunc_length=512):
     assert len(pred_text_list) == len(gold_text_list)
     pred_text_list = [(item[0].strip() if item is not None else '') for item in pred_text_list]
     gold_text_list = [item[0].strip() for item in gold_text_list]
