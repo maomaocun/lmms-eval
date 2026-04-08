@@ -888,6 +888,16 @@ def sanitize_long_string(s, max_length=40):
 
 
 def ignore_constructor(loader, node):
+    # Return the string value instead of the node object to avoid
+    # ScalarNode leaking into task configs when mode="simple" is used.
+    # This prevents thread-safety issues where one thread uses mode="simple"
+    # while another uses mode="full".
+    if isinstance(node, yaml.ScalarNode):
+        return loader.construct_scalar(node)
+    elif isinstance(node, yaml.SequenceNode):
+        return loader.construct_sequence(node)
+    elif isinstance(node, yaml.MappingNode):
+        return loader.construct_mapping(node)
     return node
 
 

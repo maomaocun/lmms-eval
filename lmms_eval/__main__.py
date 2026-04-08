@@ -470,8 +470,13 @@ def cli_evaluate(args: Union[argparse.Namespace, None] = None) -> None:
     # reset logger
     eval_logger.remove()
     # Configure logger with detailed format including file path, function name, and line number
-    log_format = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | " "<level>{level: <8}</level> | " "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - " "<level>{message}</level>"
-    eval_logger.add(sys.stdout, colorize=True, level=args.verbosity, format=log_format)
+    # Check if colors should be disabled (for clean log files)
+    use_color = os.environ.get('NO_COLOR', '') == '' and os.environ.get('LOGURU_NO_COLOR', '') == ''
+    if use_color:
+        log_format = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | " "<level>{level: <8}</level> | " "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - " "<level>{message}</level>"
+    else:
+        log_format = "{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}"
+    eval_logger.add(sys.stdout, colorize=use_color, level=args.verbosity, format=log_format)
     eval_logger.info(f"Verbosity set to {args.verbosity}")
     os.environ["VERBOSITY"] = args.verbosity
 

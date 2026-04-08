@@ -11,6 +11,7 @@ Usage:
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -77,14 +78,19 @@ def run_aggregate(args: argparse.Namespace) -> None:
     def _setup_logger():
         """Configure logging."""
         eval_logger.remove()
-        log_format = (
-            "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
-            "<level>{level: <8}</level> | "
-            "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
-            "<level>{message}</level>"
-        )
+        # Check if colors should be disabled (for clean log files)
+        use_color = os.environ.get('NO_COLOR', '') == '' and os.environ.get('LOGURU_NO_COLOR', '') == ''
+        if use_color:
+            log_format = (
+                "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
+                "<level>{level: <8}</level> | "
+                "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
+                "<level>{message}</level>"
+            )
+        else:
+            log_format = "{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}"
         log_level = "DEBUG" if args.verbose else "INFO"
-        eval_logger.add(sys.stdout, colorize=True, level=log_level, format=log_format)
+        eval_logger.add(sys.stdout, colorize=use_color, level=log_level, format=log_format)
 
     _setup_logger()
 

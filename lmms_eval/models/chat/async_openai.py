@@ -54,6 +54,7 @@ class AsyncOpenAIChat(lmms):
         max_size_in_mb: int = 20,
         mcp_server_path: str = None,
         num_cpus: int = None,
+        num_concurrent: int = None,
         work_dir: str = None,
         fps: Optional[int] = None,
         nframes: Optional[int] = 64,
@@ -83,7 +84,9 @@ class AsyncOpenAIChat(lmms):
         self.retry_backoff_s = max(0.0, float(1.0 if retry_backoff_s is None else retry_backoff_s))
         self.max_retries = max_retries
         self.max_size_in_mb = max_size_in_mb  # some models have a limit on the size of the image
-        if num_cpus is None:
+        if num_concurrent is not None:
+            self.num_cpus = int(num_concurrent)
+        elif num_cpus is None:
             self.num_cpus = cpu_count() // 2
         else:
             self.num_cpus = num_cpus
@@ -92,7 +95,24 @@ class AsyncOpenAIChat(lmms):
         self.nframes = nframes
         self.base_url = base_url if base_url is not None else os.getenv("OPENAI_API_BASE")
         self.api_key = api_key if api_key is not None else os.getenv("OPENAI_API_KEY")
-        self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, timeout=timeout)
+
+        # Support multiple backends via semicolon-separated URLs
+        if self.base_url:
+            self.base_urls = self.base_url.split(";")
+        else:
+            self.base_urls = [None]
+
+        if self.api_key:
+            self.api_keys = self.api_key.split(";")
+        else:
+            self.api_keys = [None]
+
+        if len(self.api_keys) == 1 and len(self.base_urls) > 1:
+            self.api_keys = self.api_keys * len(self.base_urls)
+
+        self.clients = [AsyncOpenAI(api_key=key, base_url=url, timeout=timeout) for key, url in zip(self.api_keys, self.base_urls)]
+        self.client = self.clients[0]  # For backward compatibility
+
         self.max_pixels = max_pixels
         self.min_pixels = min_pixels
         self.max_frames = max_frames
@@ -172,6 +192,7 @@ class AsyncOpenAIChat(lmms):
         :param request: The request instance containing the chat messages and other parameters.
         :param idx: The index of the request in the batch. (Use to restore the original order of responses)
         """
+        preproc_start = time.time()
         ctx, doc_to_messages, gen_kwargs, doc_id, task, split = request.args
         chat_messages = doc_to_messages(self.task_dict[task][split][doc_id])
         chat_messages: ChatMessages = ChatMessages(**{"messages": chat_messages})
@@ -221,9 +242,28 @@ class AsyncOpenAIChat(lmms):
             gen_kwargs["top_p"] = None
         if "do_sample" not in gen_kwargs:
             gen_kwargs["do_sample"] = False
-        # payload["max_completion_tokens"] = gen_kwargs["max_new_tokens"]
+        
+        # 设置基本生成参数
         payload["max_tokens"] = gen_kwargs["max_new_tokens"]
         payload["temperature"] = gen_kwargs["temperature"]
+        
+        # 传递 top_p (OpenAI API 标准参数)
+        if gen_kwargs.get("top_p") is not None:
+            payload["top_p"] = float(gen_kwargs["top_p"])
+        
+        # 传递 top_k (vLLM 支持 via extra_body)
+        if gen_kwargs.get("top_k") is not None:
+            payload.setdefault("extra_body", {})["top_k"] = int(gen_kwargs["top_k"])
+        
+        # 传递重复惩罚参数 (OpenAI API 标准参数)
+        if gen_kwargs.get("presence_penalty") is not None:
+            payload["presence_penalty"] = float(gen_kwargs["presence_penalty"])
+        if gen_kwargs.get("frequency_penalty") is not None:
+            payload["frequency_penalty"] = float(gen_kwargs["frequency_penalty"])
+        
+        # 传递 repetition_penalty (vLLM 支持 via extra_body)
+        if gen_kwargs.get("repetition_penalty") is not None:
+            payload.setdefault("extra_body", {})["repetition_penalty"] = float(gen_kwargs["repetition_penalty"])
 
         if self.mcp_client is not None:
             # get the function list from the MCP server
@@ -231,7 +271,13 @@ class AsyncOpenAIChat(lmms):
             payload["tools"] = functions
             payload["tool_choice"] = "auto"  # or "auto" for automatic tool selection
 
-        response = await self.client.chat.completions.create(**payload)
+        client = self.clients[idx % len(self.clients)]
+        api_start = time.time()
+        response = await client.chat.completions.create(**payload)
+        api_latency = time.time() - api_start
+        preproc_time = api_start - preproc_start
+        eval_logger.debug(f"[DEBUG] Request {idx}: Preprocessing={preproc_time:.3f}s, API_Inference={api_latency:.3f}s")
+        
         last_response = response.choices[0].message.content
         # Extract usage metrics
         input_tokens = 0
@@ -286,7 +332,7 @@ class AsyncOpenAIChat(lmms):
                         tool_messages[-1]["content"].extend(tool_message)
                     all_response += "</tool_response>"
 
-            response = await self.client.chat.completions.create(
+            response = await client.chat.completions.create(
                 model=self.model_version,
                 messages=messages + tool_messages,
                 max_tokens=gen_kwargs["max_new_tokens"],

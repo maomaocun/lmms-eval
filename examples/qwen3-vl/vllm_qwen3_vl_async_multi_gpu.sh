@@ -27,9 +27,10 @@ echo "[INFO][Machine ${MACHINE_RANK}] Logging all outputs to: ${VLLM_LOG_DIR}"
 
 # 3. 激活环境
 source /mnt/cpfs/yangyicun/miniconda3/etc/profile.d/conda.sh
-conda activate /mnt/cpfs/yangyicun/miniconda3/envs/lmms-eval-vllm
+conda activate /mnt/cpfs/yangyicun/miniconda3/envs/lmms-eval
 
 MODEL="${MODEL:-/mnt/cpfs/yangyicun/data/model/Qwen3-VL-8B-Instruct}"
+MODES_TAU="${MODES_TAU:-}" # MoDES threshold, e.g., 0.05
 TASKS="${TASKS:-mmmu,scienceqa,vizwiz_vqa_val,chartqa,ai2d,docvqa_val,ocrbench,seedbench,textvqa_val}"
 OUTPUT_PATH="${OUTPUT_PATH:-/mnt/cpfs/yangyicun/eval_result}"
 CONCURRENCY="${CONCURRENCY:-1024}" 
@@ -62,7 +63,7 @@ for (( i=0; i<$NUM_BACKENDS; i++ )); do
     
     echo "[INFO][Machine ${MACHINE_RANK}] Starting vLLM on GPUs ${GPUS} at port ${PORT}..."
     
-    CUDA_VISIBLE_DEVICES=${GPUS} python -m vllm.entrypoints.openai.api_server \
+    VLLM_MODES_SKIP_TAU="${MODES_TAU}" CUDA_VISIBLE_DEVICES=${GPUS} python -m vllm.entrypoints.openai.api_server \
         --model "${MODEL}" \
         --tensor-parallel-size "${TP}" \
         --gpu-memory-utilization 0.8 \

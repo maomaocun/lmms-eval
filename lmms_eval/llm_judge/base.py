@@ -136,8 +136,25 @@ class AsyncServerInterface(ServerInterface):
 
     def evaluate(self, request: Request) -> Response:
         """Synchronous wrapper for async evaluation"""
-        loop = asyncio.get_event_loop()
-        return loop.run_until_complete(self.evaluate_async(request))
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is not None and loop.is_running():
+            # Nested event loop or running in a thread with an active loop.
+            # asyncio.run() cannot be used here, so execute in a separate thread.
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(asyncio.run, self.evaluate_async(request))
+                return future.result()
+
+        try:
+            loop = asyncio.get_event_loop()
+            return loop.run_until_complete(self.evaluate_async(request))
+        except RuntimeError:
+            # No event loop in current thread (e.g. ThreadPoolExecutor worker).
+            return asyncio.run(self.evaluate_async(request))
 
     async def evaluate_binary_async(self, question: str, answer: str, prediction: str, output_format: str = "0/1", custom_prompt: Optional[str] = None, **kwargs) -> Dict[str, Any]:
         """Asynchronously evaluate binary correctness"""

@@ -1,0 +1,25 @@
+dataset_path: AI4Math/MathVista
+dataset_kwargs:
+  token: True
+task: "mathvista_test_qwen3"
+test_split: test
+output_type: generate_until
+doc_to_visual: !function utils_qwen3.mathvista_doc_to_visual_qwen3
+doc_to_text: !function utils_qwen3.mathvista_doc_to_text_qwen3
+doc_to_target: "answer"
+generation_kwargs:
+  max_new_tokens: 49152
+process_results: !function utils_qwen3.mathvista_qwen3_process_results
+metric_list:
+  - metric: submission
+    aggregation: !function utils_qwen3.mathvista_qwen3_aggregate_results
+    higher_is_better: true
+
+lmms_eval_specific_kwargs:
+  default:
+    shot_type: "reason-first"
+    shot: 0
+    use_caption: False
+    use_ocr: False
+    min_pixels: 1003520
+    max_pixels: 4014080

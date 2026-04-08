@@ -1,0 +1,31 @@
+dataset_path: MathLLMs/MathVision
+dataset_kwargs:
+  token: True
+task: "mathvision_testmini_qwen3"
+test_split: testmini
+output_type: generate_until
+
+# Use Qwen3-VL optimized functions
+doc_to_visual: !function utils_qwen3.mathvision_doc_to_visual_qwen3
+doc_to_text: !function utils_qwen3.mathvision_doc_to_text_qwen3
+doc_to_target: "answer"
+
+process_results: !function utils_qwen3.mathvision_qwen3_process_results
+
+metric_list:
+  - metric: mathvision_qwen3_eval
+    aggregation: !function utils_qwen3.mathvision_aggregate_results_qwen3
+    higher_is_better: true
+
+generation_kwargs:
+  max_new_tokens: 16384
+
+lmms_eval_specific_kwargs:
+  default:
+    format: "qwen3_vl"
+    prompt_format: solution
+    mc_prompt: "Answer the question with the option's letter from the given choices directly."
+    short_answer_prompt: "Answer the question with a number directly."
+    # Official image resolution settings (match Qwen3-VL official repo)
+    min_pixels: 1003520  # 1280*28*28 (~1M pixels)
+    max_pixels: 4014080  # 5120*28*28 (~4M pixels)

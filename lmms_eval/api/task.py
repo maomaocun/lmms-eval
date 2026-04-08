@@ -1531,8 +1531,8 @@ class ConfigurableTask(Task):
                 eval_logger.warning("Applied prompt returns empty string")
                 return self.config.fewshot_delimiter
         else:
-            print(type(doc_to_text))
-            raise TypeError
+            eval_logger.warning(f"Unexpected doc_to_text type: {type(doc_to_text)}")
+            raise TypeError(f"doc_to_text has unexpected type: {type(doc_to_text)}")
 
     def doc_to_target(self, doc: dict) -> Union[int, str, list]:
         doc_to_target = self.config.doc_to_target

@@ -34,7 +34,7 @@ load_dotenv(verbose=True)
 class OpenAICompatible(OpenAICompatibleSimple):
     is_simple = False
 
-    def __init__(self, **kwargs):
+    def __init__(self, max_new_tokens: int = 4096, **kwargs):
         # Capture specific args for Qwen3-VL and media processing
         self.is_qwen3_vl = kwargs.get("is_qwen3_vl", False)
         # Handle cases where is_qwen3_vl is passed as a string
@@ -48,13 +48,15 @@ class OpenAICompatible(OpenAICompatibleSimple):
         if self.video_fps is not None:
             self.video_fps = float(self.video_fps)
         self.max_frames_num = int(kwargs.get("max_frames_num", 64))
-        super().__init__(**kwargs)
+        super().__init__(max_new_tokens=max_new_tokens, **kwargs)
 
     def generate_until(self, requests) -> List[GenerationResult]:
         if not requests:
             return []
 
         reordered_requests = list(requests)
+        # Flag to print generation config only once
+        _gen_config_printed = False
         pbar = tqdm(
             total=len(reordered_requests),
             disable=(self.rank != 0),
@@ -104,7 +106,7 @@ class OpenAICompatible(OpenAICompatibleSimple):
                     api_start = time.time()
                     response = client.chat.completions.create(**payload)
                     api_latency = time.time() - api_start
-                    eval_logger.info(f"[DEBUG] Request {local_index}: Preprocessing={preproc_time:.3f}s, API_Inference={api_latency:.3f}s")
+                    eval_logger.debug(f"[DEBUG] Request {local_index}: Preprocessing={preproc_time:.3f}s, API_Inference={api_latency:.3f}s")
                     elapsed = time.time() - started_at
                     response_text = response.choices[0].message.content
                     input_tokens = 0
@@ -192,14 +194,19 @@ class OpenAICompatible(OpenAICompatibleSimple):
             completed_since_adapt = 0
 
         def build_payload_for_index(global_index: int) -> dict:
+            nonlocal _gen_config_printed
             req = reordered_requests[global_index]
             _, doc_to_messages, gen_kwargs, doc_id, task, split = req.args
 
             chat_messages_raw = doc_to_messages(self.task_dict[task][split][doc_id])
             chat_messages: ChatMessages = ChatMessages(**{"messages": chat_messages_raw})
             request_gen_kwargs = dict(gen_kwargs)
-            max_new_tokens = min(request_gen_kwargs.get("max_new_tokens", 1024), 4096)
+            max_new_tokens = min(request_gen_kwargs.get("max_new_tokens", 1024), self.max_new_tokens)
             temperature = request_gen_kwargs.get("temperature", 0)
+            top_p = request_gen_kwargs.get("top_p")
+            top_k = request_gen_kwargs.get("top_k")
+            presence_penalty = request_gen_kwargs.get("presence_penalty")
+            frequency_penalty = request_gen_kwargs.get("frequency_penalty")
 
             video_kwargs = {"max_pixels": self.max_pixels, "min_pixels": self.min_pixels}
             if self.video_fps is not None and self.video_fps > 0:
@@ -222,12 +229,26 @@ class OpenAICompatible(OpenAICompatibleSimple):
                 "temperature": temperature,
             }
 
+            # Add optional sampling parameters if provided
+            if top_p is not None:
+                payload["top_p"] = top_p
+            # top_k is not supported by standard OpenAI API, but vLLM accepts it via extra_body
+            if top_k is not None:
+                payload.setdefault("extra_body", {})["top_k"] = top_k
+            if presence_penalty is not None:
+                payload["presence_penalty"] = presence_penalty
+            if frequency_penalty is not None:
+                payload["frequency_penalty"] = frequency_penalty
+
             if "o1" in self.model_version or "o3" in self.model_version or "o4" in self.model_version or "gpt-5" in self.model_version:
                 payload.pop("temperature")
                 payload.pop("max_tokens")
                 payload["response_format"] = {"type": "text"}
                 payload["max_completion_tokens"] = 5000
 
+            if self.rank == 0 and not _gen_config_printed:
+                eval_logger.info(f"[Generate Config] task={task}, max_tokens={max_new_tokens}, temperature={temperature}, top_p={top_p}, top_k={top_k}, presence_penalty={presence_penalty}, frequency_penalty={frequency_penalty}, gen_kwargs={request_gen_kwargs}")
+                _gen_config_printed = True
             return payload
 
         def wrapped_task(local_index: int):

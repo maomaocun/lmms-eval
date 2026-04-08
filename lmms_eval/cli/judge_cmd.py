@@ -234,14 +234,19 @@ def run_judge(args: argparse.Namespace) -> None:
     def _setup_logger():
         """Configure logging to match the framework style."""
         eval_logger.remove()
-        log_format = (
-            "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
-            "<level>{level: <8}</level> | "
-            "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
-            "<level>{message}</level>"
-        )
+        # Check if colors should be disabled (for clean log files)
+        use_color = os.environ.get('NO_COLOR', '') == '' and os.environ.get('LOGURU_NO_COLOR', '') == ''
+        if use_color:
+            log_format = (
+                "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
+                "<level>{level: <8}</level> | "
+                "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
+                "<level>{message}</level>"
+            )
+        else:
+            log_format = "{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}"
         log_level = "DEBUG" if args.verbose else "INFO"
-        eval_logger.add(sys.stdout, colorize=True, level=log_level, format=log_format)
+        eval_logger.add(sys.stdout, colorize=use_color, level=log_level, format=log_format)
 
     _setup_logger()
 
@@ -265,6 +270,39 @@ def run_judge(args: argparse.Namespace) -> None:
     if not task_list:
         eval_logger.error("No tasks specified.")
         sys.exit(1)
+
+    # Expand group tasks into their subtasks so that judge can find sample files
+    if task_list != ["auto-detect"]:
+        try:
+            from lmms_eval.tasks import get_task_dict
+            from lmms_eval.evaluator_utils import get_subtask_list
+
+            def _collect_leaf_tasks(subtasks):
+                """Recursively collect leaf task names from get_subtask_list result."""
+                leaves = []
+                for name, children in subtasks.items():
+                    if not children:
+                        leaves.append(name)
+                    else:
+                        leaves.extend(children)
+                return leaves
+
+            expanded_task_list = []
+            for task_name in task_list:
+                try:
+                    task_dict = get_task_dict(task_name)
+                    subtasks = get_subtask_list(task_dict)
+                    leaves = _collect_leaf_tasks(subtasks)
+                    if leaves:
+                        expanded_task_list.extend(leaves)
+                    else:
+                        expanded_task_list.append(task_name)
+                except Exception:
+                    # If resolution fails, keep the original name
+                    expanded_task_list.append(task_name)
+            task_list = expanded_task_list
+        except Exception as e:
+            eval_logger.debug(f"Failed to expand group tasks: {e}")
 
     # Resolve input files for the requested tasks
     try:
@@ -324,8 +362,6 @@ def run_judge(args: argparse.Namespace) -> None:
             if not args.dry_run:
                 output_path = _get_output_path(input_file, args.output, args.output_dir)
                 runner.save_results(results, output_path)
-            else:
-                pass
 
             success_count += 1
 
@@ -335,6 +371,77 @@ def run_judge(args: argparse.Namespace) -> None:
                 import traceback
                 traceback.print_exc()
             error_count += 1
+
+    # Inject group-level summaries for hierarchical display
+    def _load_group_map():
+        import yaml
+        tasks_dir = Path(__file__).parent.parent / "tasks"
+        group_map = {}
+        for yaml_file in tasks_dir.rglob("*.yaml"):
+            try:
+                with open(yaml_file, "r") as f:
+                    data = yaml.safe_load(f)
+                if data and isinstance(data, dict) and "group" in data and "task" in data:
+                    members = [str(t) for t in data["task"] if isinstance(t, str)]
+                    if members:
+                        group_map[str(data["group"])] = members
+            except Exception:
+                continue
+        return group_map
+
+    def _inject_group_rows(summaries):
+        group_map = _load_group_map()
+        task_index = {name: (idx, summary) for idx, (name, summary) in enumerate(summaries)}
+        grouped_tasks = set()
+        new_rows = []
+
+        for group_name, members in group_map.items():
+            member_present = []
+            for m in members:
+                if m in task_index:
+                    member_present.append(m)
+            if not member_present:
+                continue
+
+            # Aggregate numeric metrics from member summaries.
+            # We look for the first usable float per summary (prefer exact "score",
+            # then keys ending with ".score", then any numeric value).
+            scores = []
+            for m in member_present:
+                s = task_index[m][1]
+                val = None
+                if "score" in s and isinstance(s["score"], (int, float)):
+                    val = float(s["score"])
+                else:
+                    for k, v in s.items():
+                        if k.endswith(".score") and isinstance(v, (int, float)):
+                            val = float(v)
+                            break
+                        elif isinstance(v, (int, float)):
+                            val = float(v)
+                            break
+                if val is not None:
+                    scores.append(val)
+            if scores:
+                group_summary = {"score": round(sum(scores) / len(scores), 4)}
+            else:
+                group_summary = {}
+
+            # Insert group header + indented members + group total
+            new_rows.append((group_name, group_summary))
+            for m in member_present:
+                grouped_tasks.add(m)
+                orig_summary = task_index[m][1]
+                new_rows.append((f"  {m}", orig_summary))
+
+        # Append any tasks that are not part of a group
+        for name, summary in summaries:
+            if name not in grouped_tasks:
+                new_rows.append((name, summary))
+
+        return new_rows
+
+    all_summaries = _inject_group_rows(all_summaries)
 
     # Log results in the same style as normal evaluation
     if all_summaries:

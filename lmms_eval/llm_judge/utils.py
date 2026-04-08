@@ -53,11 +53,13 @@ class ResponseParser:
         response = response.strip().lower()
 
         if output_format == "0/1" or output_format == "1/0":
-            # Check for various formats of 1
-            if any(pattern in response for pattern in ["1", "[1]", "score: 1", "answer: 1"]):
+            # Use regex to avoid matching "10" or "score: 10" as 1
+            import re
+
+            # Match 1 as a standalone token, optionally surrounded by brackets or label prefixes
+            if re.search(r"(?:^|\s|\[)1(?:\s|$|\]|\.)", response):
                 return 1
-            else:
-                return 0
+            return 0
         else:
             # yes/no format
             return response == "yes" or response.startswith("yes")
