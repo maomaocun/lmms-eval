@@ -55,14 +55,21 @@ set -uo pipefail
 # Example:
 #   export TASKS="wemath_testmini_reasoning mathvision_reason_testmini_reasoning"
 #
-# 注意：以下任务中只有 wemath_testmini_reasoning 需要 aggregate 步骤
+# 注意：以下任务需要 aggregate 步骤：
+#   - wemath_testmini_reasoning (特殊的 Loose/Strict 分数计算)
+#   - mmmu_val_qwen_judge (按学科分类聚合)
+#   - mmmu_val_qwen3_official (按 dev/validation split 聚合，官方 Qwen3-VL 评估逻辑)
 # 其他任务使用简单平均，judge 完成后即得到最终分数
 _default_tasks=(
-    mathvision_reason_test_reasoning
-    mathvision_reason_testmini_reasoning
-    mathverse_testmini_reasoning
-    mathvista_testmini_cot_reasoning
-    wemath_testmini_reasoning
+    # mathvision_reason_test_reasoning
+    # mathvision_reason_testmini_reasoning
+    # mathverse_testmini_reasoning
+    # mathvista_testmini_cot_reasoning
+    # wemath_testmini_reasoning
+    # mmmu_val_qwen_judge
+    mmmu_val_qwen3_official
+    # mmmu_val_qwen3_official  # 官方 Qwen3-VL 评估（使用 GPT judge fallback）
+    # mmmu_test
 )
 if [ -n "${TASKS:-}" ]; then
     read -ra TASKS <<< "$TASKS"
@@ -82,7 +89,7 @@ BASE_PORT="${JUDGE_BASE_PORT:-8000}"
 MODEL="${JUDGE_MODEL:-/mnt/cpfs/public_data/public_model/Qwen3-vl/Qwen3-VL-32B-Instruct}"
 GPU_MEM="${JUDGE_GPU_MEM:-0.9}"
 MAX_MODEL_LEN="${JUDGE_MAX_MODEL_LEN:-8192}"
-PARALLEL="${JUDGE_PARALLEL:-8}"
+PARALLEL="${JUDGE_PARALLEL:-128}"
 JUDGE_MODE="${JUDGE_MODE:-llm}"
 DEBUG="${JUDGE_DEBUG:-true}"
 KEEP_SERVER="${JUDGE_KEEP_SERVER:-false}"
@@ -103,12 +110,22 @@ is_vllm_running_on_port() {
 # Returns 0 if task needs aggregate, 1 otherwise
 needs_special_aggregation() {
     local task="$1"
-    # Currently only WeMath requires special aggregation
-    # Other tasks (mathvision, mathverse, mathvista) use simple mean
-    if [[ "$task" == *"wemath"* ]]; then
+    # Tasks requiring special/category-level aggregation
+    if [[ "$task" == *"wemath"* ]] || [[ "$task" == *"mmmu_val"* ]] || [[ "$task" == *"mmmu_test"* ]] || [[ "$task" == *"mmmu_val_qwen3_official"* ]]; then
         return 0  # true - needs aggregate
     else
         return 1  # false - doesn't need aggregate
+    fi
+}
+
+# Check if a task uses official Qwen3 evaluation with GPT judge fallback
+# These tasks need the judge model to be properly configured
+is_official_qwen3_task() {
+    local task="$1"
+    if [[ "$task" == *"mmmu_val_qwen3_official"* ]]; then
+        return 0  # true
+    else
+        return 1  # false
     fi
 }
 
@@ -250,7 +267,7 @@ cleanup_vllm() {
     done
     log_ok "All vLLM backends stopped"
 }
-trap cleanup_vllm EXIT INT TERM
+# trap cleanup_vllm EXIT INT TERM
 
 # Check existing backends and start missing ones
 NEED_START=()
@@ -339,6 +356,13 @@ log_info "Input: ${INPUT_ARG}"
 log_info "Output: ${OUTPUT_DIR}"
 echo "=================================================="
 
+# For mmmu_val_qwen3_official, use rule mode to trigger official evaluation logic
+# This ensures the custom process_results function is called (rule-based + GPT judge fallback)
+if [[ "${TASK_ARG}" == *"mmmu_val_qwen3_official"* ]]; then
+    JUDGE_MODE="rule"
+    log_info "Detected mmmu_val_qwen3_official task, using judge-mode=rule to enable official evaluation logic"
+fi
+
 JUDGE_CMD="python -u -m lmms_eval judge --input_result ${INPUT_ARG} --task ${TASK_ARG} --judge-mode ${JUDGE_MODE} --parallel ${PARALLEL} --output-dir ${OUTPUT_DIR}"
 log_info "Running: $JUDGE_CMD"
 log_info "Judge log file: $LOG_FILE"
@@ -359,6 +383,7 @@ fi
 # 
 # 需要 Aggregate 的任务：
 #   - wemath_testmini_reasoning: 需要分析子问题间的关系（泛化不足、死记硬背等）
+#   - mmmu_val_qwen3_official: 需要按 dev/validation split 聚合（官方实现方式）
 #
 # 不需要 Aggregate 的任务（使用简单平均，judge 已计算）：
 #   - mathvision_*_reasoning: aggregation=mean

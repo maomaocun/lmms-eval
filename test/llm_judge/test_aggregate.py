@@ -214,6 +214,18 @@ class TestAggregator:
         config = aggregator._get_special_config("some_generic_task")
         assert config is None
     
+    def test_get_special_config_no_false_positive(self):
+        """Test that substring matches inside other words are rejected."""
+        aggregator = Aggregator()
+        
+        # Should NOT match because "wemath" is embedded inside another word without word boundaries
+        config = aggregator._get_special_config("mywemathtask")
+        assert config is None
+        
+        # Should match because "wemath" is a proper prefix with underscore boundary
+        config = aggregator._get_special_config("wemath_testmini")
+        assert config is not None
+    
     def test_aggregate_generic_task(self, generic_samples):
         """Test aggregation for generic tasks."""
         aggregator = Aggregator()

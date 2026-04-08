@@ -7,6 +7,7 @@ without regeneration, completely separating the generation and judging phases.
 import asyncio
 import json
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
@@ -82,6 +83,7 @@ class JudgeRunner:
         self.parallel = parallel
         self._task_manager = None
         self._judge_provider = None
+        self._provider_lock = threading.Lock()
         self._current_task_name = None
         logger.info(
             f"JudgeRunner initialized: mode={self.judge_mode}, model={self.judge_model}, "
@@ -164,6 +166,23 @@ class JudgeRunner:
         target = sample.get("target", None)
         doc_id = sample.get("doc_id", "unknown")
         
+        # Detect whether the original doc was dropped during serialization.
+        # The evaluation tracker pops "doc" before saving JSONL, so if doc is
+        # empty we should try to reuse pre-computed metrics instead of calling
+        # process_results with an incomplete doc.
+        doc_was_dropped = not sample.get("doc")
+        
+        # For tasks that need full sample context (like mmmu_val_qwen3_official),
+        # merge sample data into doc if doc is empty or minimal
+        if not doc or (isinstance(doc, dict) and len(doc) < 3):
+            # Some tasks (e.g. mathverse) store the original doc fields in submission
+            if "submission" in sample and isinstance(sample["submission"], dict):
+                doc = dict(sample["submission"])
+                doc["__sample_context__"] = sample
+            else:
+                # Create a merged doc with sample context
+                doc = {"__sample_context__": sample}
+        
         # Convert to list if single response
         if isinstance(filtered_resps, str):
             filtered_resps = [filtered_resps]
@@ -174,17 +193,31 @@ class JudgeRunner:
         try:
             # Apply rule-based judging first (if not llm-only mode)
             if self.judge_mode in ("rule", "auto"):
-                try:
-                    metrics = process_results_fn(doc, filtered_resps)
-                    result_sample["metrics"] = metrics
-                    result_sample["judge_mode"] = "rule"
-                except Exception as rule_err:
-                    if self.judge_mode == "auto":
-                        logger.debug(f"Sample {doc_id}: rule-based failed ({rule_err}), trying LLM judge")
-                        metrics = {"rule_error": str(rule_err)}
-                        result_sample["judge_mode"] = "rule_error"
+                # If doc was dropped and we already have pre-computed metrics in the
+                # sample, reuse them rather than re-running process_results with a
+                # synthetic doc (which will almost always return 0 accuracy).
+                if doc_was_dropped:
+                    existing_metrics = self._extract_existing_metrics(sample)
+                    if existing_metrics:
+                        metrics = existing_metrics
+                        result_sample["metrics"] = metrics
+                        result_sample["judge_mode"] = "rule_existing"
                     else:
-                        raise rule_err
+                        metrics = process_results_fn(doc, filtered_resps)
+                        result_sample["metrics"] = metrics
+                        result_sample["judge_mode"] = "rule"
+                else:
+                    try:
+                        metrics = process_results_fn(doc, filtered_resps)
+                        result_sample["metrics"] = metrics
+                        result_sample["judge_mode"] = "rule"
+                    except Exception as rule_err:
+                        if self.judge_mode == "auto":
+                            logger.debug(f"Sample {doc_id}: rule-based failed ({rule_err}), trying LLM judge")
+                            metrics = {"rule_error": str(rule_err)}
+                            result_sample["judge_mode"] = "rule_error"
+                        else:
+                            raise rule_err
                 
                 # Check if we need LLM fallback
                 if self.judge_mode == "auto" and self._needs_llm_judge(metrics):
@@ -271,43 +304,50 @@ class JudgeRunner:
         Supports OpenAI, Azure, and local vLLM/SGLang servers via OpenAI-compatible API.
         For local vLLM, set JUDGE_BASE_URL to your vLLM endpoint (e.g., http://localhost:8000/v1).
         """
-        # Delayed imports
-        PF = _get_provider_factory()
-        SC = _get_server_config()
+        if self._judge_provider is not None:
+            return
         
-        # For local vLLM/SGLang, use a dummy key if not provided
-        # OpenAI client requires a key, but local servers often don't validate it
-        api_key = self.judge_api_key or "dummy-key-for-local-vllm"
-        
-        # Detect if using local vLLM/SGLang
-        is_local = any(x in self.judge_base_url for x in ["localhost", "127.0.0.1", ":8000", ":30000"])
-        if is_local:
-            logger.info(f"Detected local LLM server at {self.judge_base_url}")
-        
-        # Set env vars for the provider
-        os.environ["OPENAI_API_KEY"] = api_key
-        os.environ["OPENAI_API_URL"] = self.judge_base_url
-        
-        # Allow overriding API type for local servers
-        api_type = os.getenv("JUDGE_API_TYPE", "openai")
-        
-        config = SC(
-            model_name=self.judge_model,
-            temperature=0.0,
-            max_tokens=1024,
-            max_concurrent=self.parallel,
-        )
-        logger.info(
-            f"Judge ServerConfig: model={config.model_name}, temperature={config.temperature}, "
-            f"max_tokens={config.max_tokens}, max_concurrent={config.max_concurrent}"
-        )
-        
-        self._judge_provider = PF.create_provider(api_type=api_type, config=config)
-        
-        if is_local:
-            logger.info(f"Initialized local LLM judge provider at {self.judge_base_url}")
-        else:
-            logger.info(f"Initialized cloud LLM judge provider with model: {self.judge_model}")
+        with self._provider_lock:
+            if self._judge_provider is not None:
+                return
+            
+            # Delayed imports
+            PF = _get_provider_factory()
+            SC = _get_server_config()
+            
+            # For local vLLM/SGLang, use a dummy key if not provided
+            # OpenAI client requires a key, but local servers often don't validate it
+            api_key = self.judge_api_key or "dummy-key-for-local-vllm"
+            
+            # Detect if using local vLLM/SGLang
+            is_local = any(x in self.judge_base_url for x in ["localhost", "127.0.0.1", ":8000", ":30000"])
+            if is_local:
+                logger.info(f"Detected local LLM server at {self.judge_base_url}")
+            
+            # Set env vars for the provider
+            os.environ["OPENAI_API_KEY"] = api_key
+            os.environ["OPENAI_API_URL"] = self.judge_base_url
+            
+            # Allow overriding API type for local servers
+            api_type = os.getenv("JUDGE_API_TYPE", "openai")
+            
+            config = SC(
+                model_name=self.judge_model,
+                temperature=0.0,
+                max_tokens=16,
+                max_concurrent=self.parallel,
+            )
+            logger.info(
+                f"Judge ServerConfig: model={config.model_name}, temperature={config.temperature}, "
+                f"max_tokens={config.max_tokens}, max_concurrent={config.max_concurrent}"
+            )
+            
+            self._judge_provider = PF.create_provider(api_type=api_type, config=config)
+            
+            if is_local:
+                logger.info(f"Initialized local LLM judge provider at {self.judge_base_url}")
+            else:
+                logger.info(f"Initialized cloud LLM judge provider with model: {self.judge_model}")
     
     def _extract_question(self, doc: Dict[str, Any], sample: Optional[Dict[str, Any]] = None) -> str:
         """Extract question text from doc.
@@ -331,6 +371,28 @@ class JudgeRunner:
         
         # Last resort: return string representation
         return str(doc)[:500]  # Limit length
+    
+    def _extract_existing_metrics(self, sample: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract pre-computed metrics from a serialized sample.
+        
+        The evaluation tracker drops the ``doc`` field before saving JSONL,
+        but it preserves top-level metric keys. We harvest them here so that
+        standalone judging can reuse the original rule-based scores instead of
+        re-running ``process_results`` with an incomplete doc.
+        
+        Returns:
+            Dict of metrics if any are found, otherwise an empty dict.
+        """
+        metrics = {}
+        # Common scalar metrics
+        for key in ["acc_score", "format_score", "accuracy", "correct", "score", "exact_match", "mathvision_qwen3_eval"]:
+            if key in sample:
+                metrics[key] = sample[key]
+        # Nested metric objects (e.g. wemath_loose / wemath_strict)
+        for key in ["wemath_loose", "wemath_strict"]:
+            if key in sample:
+                metrics[key] = sample[key]
+        return metrics
     
     def _needs_llm_judge(self, metrics: Dict[str, Any]) -> bool:
         """Check if rule-based judge failed and LLM judge is needed.
@@ -417,6 +479,9 @@ class JudgeRunner:
         if not results:
             return {}
         
+        # Whitelist of meaningful nested fields to extract
+        MEANINGFUL_NESTED_FIELDS = {'hit', 'score', 'correct', 'accuracy'}
+        
         metric_values: Dict[str, List[float]] = {}
         for sample in results:
             metrics = sample.get("metrics", {})
@@ -425,12 +490,67 @@ class JudgeRunner:
                     metric_values.setdefault(key, []).append(float(val))
                 elif isinstance(val, (int, float)):
                     metric_values.setdefault(key, []).append(float(val))
-                # Skip non-numeric metrics
+                elif isinstance(val, dict):
+                    # Only extract meaningful nested fields (hit, score, correct, accuracy)
+                    for nested_key in MEANINGFUL_NESTED_FIELDS:
+                        if nested_key in val and isinstance(val[nested_key], (int, float)):
+                            nested_metric_name = f"{key}.{nested_key}"
+                            metric_values.setdefault(nested_metric_name, []).append(float(val[nested_key]))
         
         summary = {}
         for key, values in metric_values.items():
             if values:
                 summary[key] = round(sum(values) / len(values), 4)
+        
+        # Compute combined accuracy metrics for two common patterns:
+        # 1) wemath/mathvision: flat acc_score + llm_judge_score
+        # 2) mmmu/mmmu_pro: nested dict with hit + extraction_method + extraction_flag
+        
+        # --- Case 1: flat scores ---
+        acc_scores = []
+        llm_scores = []
+        for sample in results:
+            metrics = sample.get("metrics", {})
+            if "acc_score" in metrics:
+                acc_scores.append(float(metrics["acc_score"]))
+            if "llm_judge_score" in metrics:
+                llm_scores.append(float(metrics["llm_judge_score"]))
+        
+        if acc_scores and llm_scores:
+            rule_acc = sum(acc_scores) / len(acc_scores)
+            llm_fallback_acc_raw = sum(llm_scores) / len(llm_scores)
+            llm_fallback_acc = (1 - rule_acc) * llm_fallback_acc_raw
+            total_acc = rule_acc + llm_fallback_acc
+            summary["rule_acc"] = round(rule_acc, 4)
+            summary["llm_fallback_acc"] = round(llm_fallback_acc, 4)
+            summary["total_acc"] = round(total_acc, 4)
+        
+        # --- Case 2: nested official metrics (mmmu / mmmu_pro) ---
+        rule_hits = 0.0
+        fallback_hits = 0.0
+        total_count = 0
+        for sample in results:
+            metrics = sample.get("metrics", {})
+            for val in metrics.values():
+                if isinstance(val, dict) and "hit" in val and "extraction_method" in val:
+                    hit = float(val["hit"])
+                    method = val.get("extraction_method", "")
+                    flag = val.get("extraction_success", False)
+                    
+                    total_count += 1
+                    if method == "rule" and flag:
+                        rule_hits += hit
+                    else:
+                        fallback_hits += hit
+        
+        if total_count > 0:
+            rule_acc = rule_hits / total_count
+            llm_fallback_acc = fallback_hits / total_count
+            total_acc = rule_acc + llm_fallback_acc
+            summary["rule_acc"] = round(rule_acc, 4)
+            summary["llm_fallback_acc"] = round(llm_fallback_acc, 4)
+            summary["total_acc"] = round(total_acc, 4)
+        
         return summary
     
     def save_results(self, results: List[Dict[str, Any]], output_path: Path) -> None:

@@ -8,6 +8,7 @@ When using `lmms-eval judge`, per-sample results are generated. However, some ta
 
 - **WeMath**: Computes `Score (Loose)` and `Score (Strict)` based on multi-step question relationships
 - **MathVision**: Computes overall accuracy from per-sample scores
+- **MMMU Qwen3 Official**: Computes split-based accuracy from nested official metrics
 - **Generic tasks**: Simple averaging of numeric metrics
 
 ## Basic Usage
@@ -32,7 +33,7 @@ lmms-eval aggregate \
 
 ## Supported Tasks
 
-### WeMath (wemath_testmini_reasoning)
+### WeMath (`wemath_testmini_reasoning`)
 
 ```bash
 lmms-eval aggregate \
@@ -50,7 +51,7 @@ These scores reflect the model's ability to handle multi-step mathematical reaso
 - **InadequateGeneralization**: Decomposed correct but combined wrong
 - **InsufficientKnowledge**: Both wrong
 
-### MathVision (mathvision_test)
+### MathVision (`mathvision_test`)
 
 ```bash
 lmms-eval aggregate \
@@ -60,6 +61,17 @@ lmms-eval aggregate \
 
 **Output metrics:**
 - `accuracy`: Overall accuracy percentage
+
+### MMMU Qwen3 Official (`mmmu_val_qwen3_official`)
+
+```bash
+lmms-eval aggregate \
+  --input judged_mmmu.jsonl \
+  --task mmmu_val_qwen3_official
+```
+
+**Output metrics:**
+- `accuracy`: Split-based accuracy computed from nested official metrics (`mmmu_acc_official`)
 
 ### Generic Tasks
 
@@ -78,6 +90,24 @@ Options:
   --verbose, -v           Enable verbose logging
   -h, --help              Show help message
 ```
+
+## Output Summary
+
+In addition to task-specific aggregation, `lmms-eval judge` prints a summary that breaks down how much of the final score came from rule-based judging versus LLM fallback:
+
+```json
+{
+  "rule_acc": 0.5234,
+  "llm_fallback_acc": 0.2312,
+  "total_acc": 0.7546
+}
+```
+
+- `rule_acc`: Accuracy from rule-based judging
+- `llm_fallback_acc`: Additional accuracy from LLM fallback on failed rule-based samples
+- `total_acc`: Combined accuracy (`rule_acc + llm_fallback_acc`)
+
+This breakdown is produced for both flat-score tasks (e.g., MathVision, WeMath) and nested-metric tasks (e.g., MMMU official).
 
 ## Shell Script Integration
 
@@ -113,6 +143,12 @@ SPECIAL_AGGREGATIONS = {
         "module": "lmms_eval.tasks.mathvision.utils",
         "accuracy_func": "mathvision_aggregate_results_eval",
         "data_key": "mathvision_standard_eval",
+        "score_key": "scores",
+    },
+    "mmmu_val_qwen3_official": {
+        "module": "lmms_eval.tasks.mmmu.utils_qwen3_official",
+        "accuracy_func": "mmmu_qwen3_official_aggregate_accuracy",
+        "data_key": "mmmu_acc_official",
     },
 }
 ```

@@ -3,7 +3,6 @@ import re
 import time  # 引入time模块
 from math import *
 
-from latex2sympy2 import latex2sympy
 from tqdm import tqdm
 
 
@@ -54,6 +53,7 @@ def eval_tuple(s):
     Note:
         This function relies on the latex2sympy function which is assumed to be defined elsewhere in the code.
     """
+    from latex2sympy2_extended import latex2sympy
     # Split the string by commas to get individual elements
     sl = s[1:-1].split(",")
 
@@ -118,6 +118,7 @@ def is_equal(asw: str, gt_asw: str) -> bool:
     try:
         # Convert LaTeX format to a sympy expression and evaluate both expressions.
         # If the evaluated results are close enough (up to 2 decimal places), return True.
+        from latex2sympy2_extended import latex2sympy
         if round(eval(str(latex2sympy(gt_asw))), 2) == round(eval(str(latex2sympy(asw))), 2):
             return True
 

@@ -103,15 +103,21 @@ class ChatMessages(BaseModel):
                 elif content.type == "video":
                     if fetch_video is None:
                         raise ImportError("qwen_vl_utils is required for video processing. Please install it with: pip install qwen-vl-utils")
-                    video_input = fetch_video({"type": "video", "video": content.url, **video_kwargs})
-                    for frame in video_input:
-                        image = Image.fromarray(frame.permute(1, 2, 0).numpy().astype(np.uint8))
-                        openai_message["content"].append(
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": f"data:{mime_type};base64,{self.encode_image(image, encode_cache, image_format, quality)}"},
-                            }
-                        )
+                    try:
+                        video_input = fetch_video({"type": "video", "video": content.url, **video_kwargs})
+                        # Handle case where fetch_video returns a tuple instead of list
+                        if isinstance(video_input, tuple):
+                            video_input = list(video_input)
+                        for frame in video_input:
+                            image = Image.fromarray(frame.permute(1, 2, 0).numpy().astype(np.uint8))
+                            openai_message["content"].append(
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": f"data:{mime_type};base64,{self.encode_image(image, encode_cache, image_format, quality)}"},
+                                }
+                            )
+                    except Exception as e:
+                        raise RuntimeError(f"Error processing video {content.url}: {e}") from e
                 # TODO, audio hasn't been implemented yet
                 elif content.type == "audio":
                     openai_message["content"].append({"type": "audio_url", "audio_url": {"url": content.url}})
@@ -141,22 +147,35 @@ class ChatMessages(BaseModel):
                 elif content.type == "video":
                     if fetch_video is None:
                         raise ImportError("qwen_vl_utils is required for video processing. Please install it with: pip install qwen-vl-utils")
-                    video_input, fps = fetch_video(
-                        {"type": "video", "video": content.url, **video_kwargs},
-                        return_video_metadata=True,
-                        return_video_sample_fps=True,
-                    )
-                    frames, video_metadata = video_input
-                    timestamps = self._calculate_timestamps(video_metadata)
-                    for frame, timestamp in zip(frames, timestamps):
-                        image = Image.fromarray(frame.permute(1, 2, 0).numpy().astype(np.uint8))
-                        openai_message["content"].append({"type": "text", "text": f"<{timestamp:.1f} seconds>"})
-                        openai_message["content"].append(
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": f"data:{mime_type};base64,{self.encode_image(image, encode_cache, image_format, quality)}"},
-                            }
+                    try:
+                        fetch_result = fetch_video(
+                            {"type": "video", "video": content.url, **video_kwargs},
+                            return_video_metadata=True,
+                            return_video_sample_fps=True,
                         )
+                        # Handle different return formats from fetch_video
+                        if isinstance(fetch_result, (list, tuple)) and len(fetch_result) == 2:
+                            video_input, fps = fetch_result
+                            if isinstance(video_input, (list, tuple)) and len(video_input) == 2:
+                                frames, video_metadata = video_input
+                            else:
+                                # If video_input is not a tuple/list, assume it's frames directly
+                                frames = video_input
+                                video_metadata = {"fps": fps, "frames_indices": list(range(len(frames)))}
+                        else:
+                            raise ValueError(f"Unexpected fetch_video return format: {type(fetch_result)}")
+                        timestamps = self._calculate_timestamps(video_metadata)
+                        for frame, timestamp in zip(frames, timestamps):
+                            image = Image.fromarray(frame.permute(1, 2, 0).numpy().astype(np.uint8))
+                            openai_message["content"].append({"type": "text", "text": f"<{timestamp:.1f} seconds>"})
+                            openai_message["content"].append(
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": f"data:{mime_type};base64,{self.encode_image(image, encode_cache, image_format, quality)}"},
+                                }
+                            )
+                    except Exception as e:
+                        raise RuntimeError(f"Error processing video {content.url}: {e}") from e
                 # TODO, audio hasn't been implemented yet
                 elif content.type == "audio":
                     openai_message["content"].append({"type": "audio_url", "audio_url": {"url": content.url}})

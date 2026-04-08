@@ -86,3 +86,7 @@ CLAUDE.md
 SFE_images/
 superchem_cn_images/
 superchem_en_images/
+
+.venv_old
+eval_result/
+judged_results/

@@ -23,21 +23,21 @@
 # - Qwen/Qwen3-VL-30B-A3B-Thinking
 # - Qwen/Qwen3-VL-235B-A22B-Instruct
 # - Qwen/Qwen3-VL-235B-A22B-Thinking
-MODEL="Qwen/Qwen3-VL-30B-A3B-Instruct"
+MODEL="/mnt/cpfs/yangyicun/data/model/Qwen3-VL-8B-Instruct"
 
 # Parallelization Settings
 # Adjust based on your GPU configuration.
 # If DATA_PARALLEL_SIZE > 1, this script automatically switches to torchrun.
-TENSOR_PARALLEL_SIZE=4  # Number of GPUs for tensor parallelism
+TENSOR_PARALLEL_SIZE=8  # Number of GPUs for tensor parallelism
 DATA_PARALLEL_SIZE=1    # Global number of data-parallel replicas, not a per-GPU local value
 
 # Memory and Performance Settings
 GPU_MEMORY_UTILIZATION=0.85  # Fraction of GPU memory to use (0.0 - 1.0)
-BATCH_SIZE=64                # Batch size for evaluation
+BATCH_SIZE=128                # Batch size for evaluation
 
 # Task Configuration
 # Common tasks: mmmu_val, mme, mathvista, ai2d, etc.
-TASKS="mmmu_val,mme"
+TASKS="mmmu_test"
 
 # Output Configuration
 OUTPUT_PATH="./logs/qwen3vl_vllm"
@@ -69,7 +69,7 @@ echo "Batch Size: $BATCH_SIZE"
 echo "Output Path: $OUTPUT_PATH"
 echo "=========================================="
 
-LAUNCHER="uv run python -m lmms_eval"
+LAUNCHER="python -m lmms_eval"
 MODEL_ARGS="model=${MODEL},tensor_parallel_size=${TENSOR_PARALLEL_SIZE},gpu_memory_utilization=${GPU_MEMORY_UTILIZATION}"
 
 if [ "${DATA_PARALLEL_SIZE}" -gt 1 ]; then

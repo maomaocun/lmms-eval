@@ -1,0 +1,8 @@
+group: mathvista_testmini_qwen3
+task:
+  - mathvista_testmini_cot_qwen3
+  - mathvista_testmini_solution_qwen3
+  - mathvista_testmini_format_qwen3
+metadata:
+  version: 0.0
+  quick_extract: false

@@ -2,6 +2,9 @@
 
 This directory contains examples demonstrating how to use the `lmms-eval judge` command to separate generation and judging phases.
 
+> For the underlying architecture, see [`docs/llm_judge/architecture.md`](../../docs/llm_judge/architecture.md).  
+> For the `lmms-eval aggregate` command reference, see [`docs/llm_judge/aggregate_usage.md`](../../docs/llm_judge/aggregate_usage.md).
+
 ## Available Scripts
 
 | Script | Purpose | Usage |

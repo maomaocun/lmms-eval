@@ -3,7 +3,7 @@ set -euo pipefail
 
 # 1. 自动检测资源
 WORLD_SIZE="${WORLD_SIZE:-8}"
-TP="${TP:-4}"
+TP="${TP:-1}"
 NUM_BACKENDS=$(( WORLD_SIZE / TP ))
 
 echo "[INFO] Detected WORLD_SIZE=${WORLD_SIZE}, TP=${TP}. Will start ${NUM_BACKENDS} vLLM instances for Qwen2-VL."

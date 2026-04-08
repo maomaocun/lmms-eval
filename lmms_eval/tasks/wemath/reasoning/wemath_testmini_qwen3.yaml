@@ -1,0 +1,38 @@
+dataset_path: We-Math/We-Math
+task: "wemath_testmini_qwen3"
+output_type: generate_until
+test_split: testmini
+doc_to_target: "answer"
+
+# Use Qwen3-VL optimized functions
+doc_to_messages: !function lmms_eval.tasks.wemath.utils_qwen3.wemath_doc_to_messages_qwen3
+doc_to_text: !function lmms_eval.tasks.wemath.utils_qwen3.wemath_doc_to_text_qwen3
+doc_to_visual: !function lmms_eval.tasks.wemath.utils_qwen3.wemath_doc_to_visual_qwen3
+
+process_results: !function lmms_eval.tasks.wemath.utils_qwen3.wemath_qwen3_process_results
+
+metric_list:
+  - metric: acc_score
+    aggregation: mean
+    higher_is_better: true
+  - metric: format_score
+    aggregation: mean
+    higher_is_better: true
+  - metric: wemath_loose
+    aggregation: !function lmms_eval.tasks.wemath.utils_qwen3.wemath_aggregate_results_loose
+    higher_is_better: true
+  - metric: wemath_strict
+    aggregation: !function lmms_eval.tasks.wemath.utils_qwen3.wemath_aggregate_results_strict
+    higher_is_better: true
+
+generation_kwargs:
+  max_new_tokens: 49152
+
+lmms_eval_specific_kwargs:
+  default:
+    format: "qwen3_vl"
+    # System prompt for reasoning tasks
+    system_prompt: "You are a helpful assistant. When the user asks a question, your response must include two parts: first, the reasoning process enclosed in <think>...</think> tags, then the final answer enclosed in <answer>...</answer> tags. Please provide a clear, concise response within <answer> </answer> tags that directly addresses the question."
+    # Official image resolution settings (match Qwen3-VL official repo)
+    min_pixels: 1003520  # 1280*28*28 (~1M pixels)
+    max_pixels: 4014080  # 5120*28*28 (~4M pixels)

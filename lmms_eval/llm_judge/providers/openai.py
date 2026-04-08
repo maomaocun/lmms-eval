@@ -1,5 +1,6 @@
 import itertools
 import os
+import threading
 import time
 from typing import Dict, List, Optional, Union
 
@@ -20,10 +21,13 @@ class OpenAIProvider(ServerInterface):
     e.g. http://localhost:8000/v1;http://localhost:8001/v1
     """
 
+    _in_flight = 0
+    _in_flight_lock = threading.Lock()
+
     def __init__(self, config: Optional[ServerConfig] = None):
         super().__init__(config)
         self.api_key = os.getenv("OPENAI_API_KEY", "")
-        raw_api_url = os.getenv("OPENAI_API_URL", "https://api.openai.com/v1/chat/completions/v1")
+        raw_api_url = os.getenv("OPENAI_API_URL", "https://api.openai.com/v1/chat/completions")
         self.api_urls = [u.strip() for u in raw_api_url.split(";") if u.strip()]
 
         self.clients = []
@@ -52,77 +56,97 @@ class OpenAIProvider(ServerInterface):
         if not self.is_available():
             raise ValueError("OpenAI API key not configured")
 
-        config = request.config or self.config
-        messages = self.prepare_messages(request)
+        with OpenAIProvider._in_flight_lock:
+            OpenAIProvider._in_flight += 1
+            in_flight = OpenAIProvider._in_flight
 
-        # Handle images if present
-        if request.images:
-            messages = self._add_images_to_messages(messages, request.images)
+        started_at = time.time()
+        try:
+            config = request.config or self.config
+            messages = self.prepare_messages(request)
 
-        # Prepare payload
-        payload = {
-            "model": config.model_name,
-            "messages": messages,
-            "temperature": config.temperature,
-            "max_tokens": config.max_tokens,
-        }
+            # Handle images if present
+            if request.images:
+                messages = self._add_images_to_messages(messages, request.images)
 
-        if config.top_p is not None:
-            payload["top_p"] = config.top_p
+            # Prepare payload
+            payload = {
+                "model": config.model_name,
+                "messages": messages,
+                "temperature": config.temperature,
+                "max_tokens": config.max_tokens,
+            }
 
-        if config.response_format == "json":
-            payload["response_format"] = {"type": "json_object"}
+            if config.top_p is not None:
+                payload["top_p"] = config.top_p
 
-        # Make API call with retries (across URLs for resilience)
-        last_exception = None
-        urls_attempted = set()
-        for attempt in range(config.num_retries):
-            try:
-                if self.use_client:
-                    client = self._next_client()
-                    response = client.chat.completions.create(**payload)
-                    content = response.choices[0].message.content
-                    model_used = response.model
-                    usage = response.usage.model_dump() if hasattr(response.usage, "model_dump") else None
-                    raw_response = response
-                else:
-                    url = self.api_urls[attempt % len(self.api_urls)]
-                    response = self._make_request(payload, config.timeout, url)
-                    content = response["choices"][0]["message"]["content"]
-                    model_used = response["model"]
-                    usage = response.get("usage")
-                    raw_response = response
+            if config.response_format == "json":
+                payload["response_format"] = {"type": "json_object"}
 
-                # Log usage for token tracking
-                if self.use_client and hasattr(response, "usage") and response.usage:
-                    log_usage(
-                        model_name=model_used or config.model_name,
-                        task_name=None,
-                        input_tokens=getattr(response.usage, "prompt_tokens", 0) or 0,
-                        output_tokens=getattr(response.usage, "completion_tokens", 0) or 0,
-                        reasoning_tokens=0,
-                        source="judge",
+            # Make API call with retries (across URLs for resilience)
+            last_exception = None
+            urls_attempted = set()
+            for attempt in range(config.num_retries):
+                try:
+                    if self.use_client:
+                        client = self._next_client()
+                        response = client.chat.completions.create(**payload)
+                        content = response.choices[0].message.content
+                        model_used = response.model
+                        usage = response.usage.model_dump() if hasattr(response.usage, "model_dump") else None
+                        raw_response = response
+                    else:
+                        url = self.api_urls[attempt % len(self.api_urls)]
+                        response = self._make_request(payload, config.timeout, url)
+                        content = response["choices"][0]["message"]["content"]
+                        model_used = response["model"]
+                        usage = response.get("usage")
+                        raw_response = response
+
+                    latency = time.time() - started_at
+                    input_tokens = 0
+                    output_tokens = 0
+                    if self.use_client and hasattr(response, "usage") and response.usage:
+                        input_tokens = getattr(response.usage, "prompt_tokens", 0) or 0
+                        output_tokens = getattr(response.usage, "completion_tokens", 0) or 0
+                        log_usage(
+                            model_name=model_used or config.model_name,
+                            task_name=None,
+                            input_tokens=input_tokens,
+                            output_tokens=output_tokens,
+                            reasoning_tokens=0,
+                            source="judge",
+                        )
+                    elif not self.use_client and isinstance(usage, dict):
+                        input_tokens = usage.get("prompt_tokens", 0) or 0
+                        output_tokens = usage.get("completion_tokens", 0) or 0
+                        log_usage(
+                            model_name=model_used or config.model_name,
+                            task_name=None,
+                            input_tokens=input_tokens,
+                            output_tokens=output_tokens,
+                            reasoning_tokens=0,
+                            source="judge",
+                        )
+
+                    eval_logger.debug(
+                        f"[Judge] in={input_tokens}, out={output_tokens}, "
+                        f"fly={in_flight}, latency={latency:.3f}s, model={model_used or config.model_name}"
                     )
-                elif not self.use_client and isinstance(usage, dict):
-                    log_usage(
-                        model_name=model_used or config.model_name,
-                        task_name=None,
-                        input_tokens=usage.get("prompt_tokens", 0) or 0,
-                        output_tokens=usage.get("completion_tokens", 0) or 0,
-                        reasoning_tokens=0,
-                        source="judge",
-                    )
 
-                return Response(content=content.strip(), model_used=model_used, usage=usage, raw_response=raw_response)
+                    return Response(content=content.strip(), model_used=model_used, usage=usage, raw_response=raw_response)
 
-            except Exception as e:
-                last_exception = e
-                eval_logger.warning(f"Attempt {attempt + 1}/{config.num_retries} failed: {str(e)}")
-                if attempt < config.num_retries - 1:
-                    time.sleep(config.retry_delay)
-                else:
-                    eval_logger.error(f"All {config.num_retries} attempts failed")
-                    raise last_exception
+                except Exception as e:
+                    last_exception = e
+                    eval_logger.warning(f"Attempt {attempt + 1}/{config.num_retries} failed: {str(e)}")
+                    if attempt < config.num_retries - 1:
+                        time.sleep(config.retry_delay)
+                    else:
+                        eval_logger.error(f"All {config.num_retries} attempts failed")
+                        raise last_exception
+        finally:
+            with OpenAIProvider._in_flight_lock:
+                OpenAIProvider._in_flight -= 1
 
     def _make_request(self, payload: Dict, timeout: int, url: Optional[str] = None) -> Dict:
         """Make HTTP request to OpenAI API"""

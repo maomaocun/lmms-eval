@@ -90,6 +90,7 @@ class OpenAICompatible(lmms):
         adaptive_failure_threshold: float = 0.05,
         prefix_aware_queue: bool = True,
         prefix_hash_chars: int = 256,
+        max_new_tokens: int = 4096,
         **kwargs,
     ) -> None:
         """
@@ -125,6 +126,7 @@ class OpenAICompatible(lmms):
         )
         self.prefix_aware_queue = parse_bool(prefix_aware_queue)
         self.prefix_hash_chars = max(32, int(prefix_hash_chars))
+        self.max_new_tokens = int(max_new_tokens)
         # In China mainland, people usually use a VPN client to access international web
         # sites such as Google. Such a client usually configures macOS proxy server
         # settings. openai-python uses a httpx.Client with trust_env set to True. Such a
@@ -312,6 +314,9 @@ class OpenAICompatible(lmms):
 
         if not ordered_requests:
             return []
+        
+        # Flag to print generation config only once
+        _gen_config_printed = False
 
         pbar = tqdm(
             total=len(ordered_requests),
@@ -354,7 +359,7 @@ class OpenAICompatible(lmms):
                     api_start = time.time()
                     response = client.chat.completions.create(**payload)
                     api_latency = time.time() - api_start
-                    eval_logger.info(f"[DEBUG] Request {local_index}: Preprocessing={preproc_time:.3f}s, API_Inference={api_latency:.3f}s")
+                    eval_logger.debug(f"[DEBUG] Request {local_index}: Preprocessing={preproc_time:.3f}s, API_Inference={api_latency:.3f}s")
                     response_text = _normalize_openai_message_content(response.choices[0].message.content)
                     token_counts = None
                     if hasattr(response, "usage") and response.usage:
@@ -428,6 +433,7 @@ class OpenAICompatible(lmms):
             completed_since_adapt = 0
 
         def build_payload_for_index(global_index: int):
+            nonlocal _gen_config_printed
             (
                 context,
                 gen_kwargs,
@@ -455,8 +461,12 @@ class OpenAICompatible(lmms):
                         imgs.append(self.encode_image(visual))
 
             request_gen_kwargs = dict(gen_kwargs)
-            max_new_tokens = min(request_gen_kwargs.get("max_new_tokens", 1024), 4096)
+            max_new_tokens = min(request_gen_kwargs.get("max_new_tokens", 1024), self.max_new_tokens)
             temperature = request_gen_kwargs.get("temperature", 0)
+            top_p = request_gen_kwargs.get("top_p")
+            top_k = request_gen_kwargs.get("top_k")
+            presence_penalty = request_gen_kwargs.get("presence_penalty")
+            frequency_penalty = request_gen_kwargs.get("frequency_penalty")
 
             payload = {
                 "model": self.model_version,
@@ -464,6 +474,17 @@ class OpenAICompatible(lmms):
                 "max_tokens": max_new_tokens,
                 "temperature": temperature,
             }
+            
+            # Add optional sampling parameters if provided
+            if top_p is not None:
+                payload["top_p"] = top_p
+            # top_k is not supported by standard OpenAI API, but vLLM accepts it via extra_body
+            if top_k is not None:
+                payload.setdefault("extra_body", {})["top_k"] = top_k
+            if presence_penalty is not None:
+                payload["presence_penalty"] = presence_penalty
+            if frequency_penalty is not None:
+                payload["frequency_penalty"] = frequency_penalty
             payload["messages"][0]["content"].append({"type": "text", "text": context})
             for img in imgs:
                 if isinstance(img, dict) and "audio_b64" in img:
@@ -488,6 +509,9 @@ class OpenAICompatible(lmms):
                 payload.pop("max_tokens")
                 payload["max_completion_tokens"] = max_new_tokens
 
+            if self.rank == 0 and not _gen_config_printed:
+                eval_logger.info(f"[Generate Config] task={task_name}, max_tokens={max_new_tokens}, temperature={temperature}, top_p={top_p}, top_k={top_k}, presence_penalty={presence_penalty}, frequency_penalty={frequency_penalty}, gen_kwargs={request_gen_kwargs}")
+                _gen_config_printed = True
             return payload
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:

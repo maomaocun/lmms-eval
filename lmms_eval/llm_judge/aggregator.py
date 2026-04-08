@@ -54,6 +54,11 @@ class Aggregator:
             "data_key": "mathvision_standard_eval",
             "score_key": "scores",  # Key within data to extract scores
         },
+        "mmmu_val_qwen3_official": {
+            "module": "lmms_eval.tasks.mmmu.utils_qwen3_official",
+            "accuracy_func": "mmmu_qwen3_official_aggregate_accuracy",
+            "data_key": "mmmu_acc_official",  # Key in metrics to extract data from
+        },
     }
     
     def __init__(self):
@@ -93,8 +98,13 @@ class Aggregator:
         Returns:
             Special config dict if task needs special handling, None otherwise
         """
+        task_lower = task_name.lower()
         for pattern, config in self.SPECIAL_AGGREGATIONS.items():
-            if pattern in task_name.lower():
+            # Use word-boundary matching to avoid false positives
+            # e.g. "wemath" should match "wemath_testmini" but not "mywemathtask"
+            import re
+
+            if re.search(rf"(^|_){re.escape(pattern)}(_|$)", task_lower):
                 return config
         return None
     

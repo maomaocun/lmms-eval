@@ -1,0 +1,148 @@
+#!/bin/bash
+# tools/start_vllm_judge.sh
+#
+# 启动本地 vLLM 作为 judge 后端，并等待其就绪。
+#
+# 用法：
+#   bash tools/start_vllm_judge.sh \
+#       --model-path <path> \
+#       --served-model-name <name> \
+#       --tp <int> \
+#       --max-model-len <int> \
+#       --gpu-memory-utilization <float> \
+#       --max-num-seqs <int> \
+#       --port <int> \
+#       --log <log_file>
+#
+# 成功启动后，最后一行输出：VLLM_PID=<pid>
+
+set -euo pipefail
+
+# ── 解析参数 ─────────────────────────────────────────────────────────────────
+MODEL_PATH=""
+SERVED_MODEL_NAME=""
+TP=1
+MAX_MODEL_LEN=32768
+GPU_MEM_UTIL="0.8"
+MAX_NUM_SEQS=512
+PORT=8002
+LOG_FILE=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --model-path)
+            MODEL_PATH="$2"; shift 2 ;;
+        --served-model-name)
+            SERVED_MODEL_NAME="$2"; shift 2 ;;
+        --tp)
+            TP="$2"; shift 2 ;;
+        --max-model-len)
+            MAX_MODEL_LEN="$2"; shift 2 ;;
+        --gpu-memory-utilization)
+            GPU_MEM_UTIL="$2"; shift 2 ;;
+        --max-num-seqs)
+            MAX_NUM_SEQS="$2"; shift 2 ;;
+        --port)
+            PORT="$2"; shift 2 ;;
+        --log)
+            LOG_FILE="$2"; shift 2 ;;
+        *)
+            echo "[ERROR] Unknown argument: $1"; exit 1 ;;
+    esac
+done
+
+[[ -z "${MODEL_PATH}" ]] && { echo "[ERROR] --model-path is required"; exit 1; }
+[[ -z "${LOG_FILE}" ]] && { echo "[ERROR] --log is required"; exit 1; }
+
+# 确保日志目录存在
+mkdir -p "$(dirname "${LOG_FILE}")"
+
+# 默认 served model name 与模型路径 basename 一致
+if [[ -z "${SERVED_MODEL_NAME}" ]]; then
+    SERVED_MODEL_NAME=$(basename "${MODEL_PATH}")
+fi
+
+JUDGE_BASE_URL="http://localhost:${PORT}/v1"
+
+# ── 检查是否已有可用的 vLLM 在跑 ──────────────────────────────────────────────
+check_existing_vllm() {
+    local url="$1"
+    local expected_model="$2"
+    local http_status
+    http_status=$(curl -s -o /dev/null -w "%{http_code}" "${url}/models" 2>/dev/null || echo "000")
+    [[ "${http_status}" != "200" ]] && return 1
+
+    # 用 python 检查返回的模型列表中是否包含 expected_model
+    local matched
+    matched=$(curl -s "${url}/models" 2>/dev/null | python -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    models = [m.get('id','') for m in data.get('data',[])]
+    expected = sys.argv[1]
+    print('true' if any(expected == m or expected in m for m in models) else 'false')
+except Exception:
+    print('false')
+" "${expected_model}" 2>/dev/null)
+
+    [[ "${matched}" == "true" ]]
+}
+
+if check_existing_vllm "${JUDGE_BASE_URL}" "${SERVED_MODEL_NAME}"; then
+    echo "[INFO] Found existing vLLM on port ${PORT} with model ${SERVED_MODEL_NAME}, reusing it."
+    # 尝试找到已有进程的 PID
+    EXISTING_PID=$(lsof -ti :"${PORT}" 2>/dev/null | head -n1 || echo "")
+    echo "VLLM_PID=${EXISTING_PID}"
+    exit 0
+fi
+
+# ── 启动新的 vLLM ────────────────────────────────────────────────────────────
+echo "[INFO] Starting vLLM judge backend..."
+echo "[INFO] Model: ${MODEL_PATH}"
+echo "[INFO] Served model name: ${SERVED_MODEL_NAME}"
+echo "[INFO] TP: ${TP}, Port: ${PORT}"
+echo "[INFO] Log file: ${LOG_FILE}"
+
+# 使用 setsid 让 vLLM 脱离当前终端进程组，避免前台按 Ctrl+C 误杀
+if command -v setsid &>/dev/null; then
+    CUDA_VISIBLE_DEVICES=0,1,2,3 setsid python -m vllm.entrypoints.openai.api_server \
+        --model "${MODEL_PATH}" \
+        --served-model-name "${SERVED_MODEL_NAME}" \
+        --tensor-parallel-size "${TP}" \
+        --max-model-len "${MAX_MODEL_LEN}" \
+        --gpu-memory-utilization "${GPU_MEM_UTIL}" \
+        --max-num-seqs "${MAX_NUM_SEQS}" \
+        --port "${PORT}" \
+        --trust-remote-code \
+        > "${LOG_FILE}" 2>&1 &
+else
+    CUDA_VISIBLE_DEVICES=0,1,2,3 nohup python -m vllm.entrypoints.openai.api_server \
+        --model "${MODEL_PATH}" \
+        --served-model-name "${SERVED_MODEL_NAME}" \
+        --tensor-parallel-size "${TP}" \
+        --max-model-len "${MAX_MODEL_LEN}" \
+        --gpu-memory-utilization "${GPU_MEM_UTIL}" \
+        --max-num-seqs "${MAX_NUM_SEQS}" \
+        --port "${PORT}" \
+        --trust-remote-code \
+        > "${LOG_FILE}" 2>&1 &
+fi
+
+VLLM_PID=$!
+
+# 等待 vLLM 就绪
+echo "[INFO] Waiting for vLLM to be ready (timeout: 10min)..."
+check_http() { curl -s -o /dev/null -w "%{http_code}" "$1/models" 2>/dev/null; }
+retries=0
+while [[ "$(check_http "${JUDGE_BASE_URL}")" != "200" ]]; do
+    sleep 5
+    retries=$((retries + 1))
+    if (( retries >= 120 )); then
+        echo "[ERROR] Timeout waiting for vLLM"
+        exit 1
+    fi
+    echo "[INFO] Waiting... (${retries}/120)"
+done
+
+echo "[INFO] vLLM judge backend ready at ${JUDGE_BASE_URL}"
+echo "VLLM_PID=${VLLM_PID}"

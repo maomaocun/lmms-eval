@@ -16,7 +16,7 @@ from nltk.translate.meteor_score import meteor_score
 from rouge_score import rouge_scorer
 from sklearn.metrics import roc_auc_score, f1_score, precision_score, recall_score, matthews_corrcoef
 
-from .smiles_canonicalization import canonicalize_molecule_smiles, get_molecule_id
+from .smiles_canonicalization import canonicalize_molecule_smiles, canonicalize_molecule_smiles_parallel, get_molecule_id
 
 
 RDLogger.DisableLog('rdApp.*')
@@ -139,7 +139,9 @@ def calculate_smiles_metrics(
         dk_pred_smiles_list_dict[dk] = []
         dk_pred_no_answer_labels_dict[dk] = []
         dk_pred_invalid_labels_dict[dk] = []
-    for pred_smiles_list in tqdm(preds_smiles_list):
+    flat_pred_items = []
+    flat_pred_indices = []
+    for sample_idx, pred_smiles_list in enumerate(preds_smiles_list):
         if pred_smiles_list is None:
             for dk in range(k):
                 dk_pred_no_answer_labels_dict[dk].append(True)
@@ -148,31 +150,46 @@ def calculate_smiles_metrics(
             continue
         assert len(pred_smiles_list) == k
         for dk, item in enumerate(pred_smiles_list):
-            # item = item.strip()
             if item == '' or item is None:
-                item = None
                 dk_pred_no_answer_labels_dict[dk].append(True)
                 dk_pred_invalid_labels_dict[dk].append(False)
+                dk_pred_smiles_list_dict[dk].append(None)
             else:
                 dk_pred_no_answer_labels_dict[dk].append(False)
-                item = canonicalize_molecule_smiles(item)
-                if item is None:
-                    dk_pred_invalid_labels_dict[dk].append(True)
-                else:
-                    dk_pred_invalid_labels_dict[dk].append(False)
-            dk_pred_smiles_list_dict[dk].append(item)
-    
-    new_list = []
-    for gold_smiles_list in tqdm(golds_smiles_list):
-        sample_gold_smiles_list = []
-        for gold in gold_smiles_list:
+                dk_pred_invalid_labels_dict[dk].append(False)  # placeholder
+                dk_pred_smiles_list_dict[dk].append(None)       # placeholder
+                flat_pred_items.append(item)
+                flat_pred_indices.append((sample_idx, dk))
+
+    if flat_pred_items:
+        flat_pred_results = canonicalize_molecule_smiles_parallel(flat_pred_items, return_none_for_error=True)
+        for (sample_idx, dk), res in zip(flat_pred_indices, flat_pred_results):
+            dk_pred_smiles_list_dict[dk][sample_idx] = res
+            if res is None:
+                dk_pred_invalid_labels_dict[dk][sample_idx] = True
+
+    flat_gold_items = []
+    flat_gold_indices = []
+    new_list = [None] * num_all
+    for sample_idx, gold_smiles_list in enumerate(golds_smiles_list):
+        sample_gold_smiles_list = [None] * len(gold_smiles_list)
+        new_list[sample_idx] = sample_gold_smiles_list
+        for gold_idx, gold in enumerate(gold_smiles_list):
             item = gold.strip()
-            new_item = canonicalize_molecule_smiles(item, return_none_for_error=False)
-            # if new_item is None:
-            #     new_item = item  #TODO
-            # assert new_item is not None, item
-            sample_gold_smiles_list.append(new_item)
-        new_list.append(sample_gold_smiles_list)
+            flat_gold_items.append(item)
+            flat_gold_indices.append((sample_idx, gold_idx))
+
+    if flat_gold_items:
+        flat_gold_results = canonicalize_molecule_smiles_parallel(flat_gold_items, return_none_for_error=False, fallback_to_original=True)
+        for (sample_idx, gold_idx), res in zip(flat_gold_indices, flat_gold_results):
+            new_list[sample_idx][gold_idx] = res if res != "" else flat_gold_items[len([i for i, idx in enumerate(flat_gold_indices) if idx == (sample_idx, gold_idx)]) - 1]
+            # simpler fallback: if empty string returned by failed chunk, use original
+            if res == "":
+                # find original index
+                orig_idx = flat_gold_indices.index((sample_idx, gold_idx))
+                new_list[sample_idx][gold_idx] = flat_gold_items[orig_idx]
+            else:
+                new_list[sample_idx][gold_idx] = res
     golds_smiles_list = new_list
 
     metric_results = {'num_all': num_all}
@@ -437,7 +454,7 @@ def calculate_formula_metrics(
     return metric_results
 
 
-def calculate_text_metrics(pred_text_list, gold_text_list, text_model='/mnt/innovator/zyj/.cache/huggingface/hub/models--allenai--scibert_scivocab_uncased/snapshots/24f92d32b1bfb0bcaf9ab193ff3ad01e87732fc1', text_trunc_length=512):
+def calculate_text_metrics(pred_text_list, gold_text_list, text_model='allenai/scibert_scivocab_uncased', text_trunc_length=512):
     assert len(pred_text_list) == len(gold_text_list)
     pred_text_list = [(item[0].strip() if item is not None else '') for item in pred_text_list]
     gold_text_list = [item[0].strip() for item in gold_text_list]
