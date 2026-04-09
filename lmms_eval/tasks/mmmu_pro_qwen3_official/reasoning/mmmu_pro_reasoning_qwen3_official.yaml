@@ -1,0 +1,4 @@
+group: mmmu_pro_reasoning_qwen3_official
+task:
+- mmmu_pro_standard_reasoning_qwen3_official
+- mmmu_pro_vision_reasoning_qwen3_official

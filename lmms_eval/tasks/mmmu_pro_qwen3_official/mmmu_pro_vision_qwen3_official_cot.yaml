@@ -1,0 +1,30 @@
+dataset_path: MMMU/MMMU_Pro
+dataset_name: vision
+task: "mmmu_pro_vision_qwen3_official_cot"
+test_split: test
+output_type: generate_until
+doc_to_visual: !function utils_qwen3_official.mmmu_pro_doc_to_visual
+doc_to_text: !function utils_qwen3_official.mmmu_pro_doc_to_text
+doc_to_target: "answer"
+# Use official evaluation logic with GPT judge fallback
+process_results: !function utils_qwen3_official.mmmu_pro_process_results_official
+
+generation_kwargs:
+  max_new_tokens: 16384
+
+metric_list:
+  - metric: mmmu_pro_acc_official
+    aggregation: !function utils_qwen3_official.mmmu_pro_aggregate_results_official
+    higher_is_better: true
+
+lmms_eval_specific_kwargs:
+  default:
+    format: "qwen3_vl"
+    pre_prompt: ""
+    post_prompt: "Answer with the option letter only."
+    vision_prompt: "Write out the multiple-choice question in the image and then solve it. The last line of your response should be of the following format: 'Answer: $LETTER' (without quotes) where LETTER is one of options. Think step by step before answering."
+    # Official image resolution settings (match Qwen3-VL official repo)
+    min_pixels: 1003520  # 1280*28*28 (~1M pixels)
+    max_pixels: 4014080  # 5120*28*28 (~4M pixels)
+
+include: _default_template_yaml

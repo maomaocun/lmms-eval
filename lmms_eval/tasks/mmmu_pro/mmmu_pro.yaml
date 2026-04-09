@@ -3,4 +3,3 @@ task:
 - mmmu_pro_vision
 # - mmmu_pro_composite # removing composite task in formal MMMU-Pro evaluation
 - mmmu_pro_standard
-- mmmu_pro_standard_qwen3_official  # Qwen3-VL official evaluation with GPT judge
