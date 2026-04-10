@@ -205,12 +205,15 @@ def construct_prompt(doc: Dict, lmms_eval_specific_kwargs: Optional[Dict] = None
     
     pre_prompt = lmms_eval_specific_kwargs.get("pre_prompt", "")
     post_prompt = lmms_eval_specific_kwargs.get("post_prompt", "")
+    vision_prompt = lmms_eval_specific_kwargs.get("vision_prompt", "")
     
-    # MMMU-Pro always has question and options
-    question = doc.get("question", "")
     options = parse_options(ast.literal_eval(doc["options"]))
     
-    prompt = f"{pre_prompt}{question}\nOptions:\n{options}\n{post_prompt}"
+    if "question" in doc and doc.get("question"):
+        question = doc["question"]
+        prompt = f"{pre_prompt}{question}\nOptions:\n{options}\n{post_prompt}"
+    else:
+        prompt = f"{vision_prompt}\nOptions:\n{options}\n{post_prompt}"
     
     return prompt
 
@@ -239,6 +242,10 @@ def mmmu_pro_doc_to_visual(doc: Dict) -> List:
     for image_token in image_tokens:
         if image_token in doc:
             visual.append(doc[image_token].convert("RGB"))
+    
+    # Fallback for vision subset (no interleaved image tokens, single image field)
+    if not visual and "image" in doc:
+        visual.append(doc["image"].convert("RGB"))
     
     return visual
 
@@ -592,7 +599,7 @@ def mmmu_pro_process_results_official(doc: Dict, results: List[str]) -> Dict[str
     
     This function ONLY saves raw generation results. NO judge is called.
     Judging must be done separately using: 
-        python -m lmms_eval judge --input_result <result.jsonl> --task mmmu_pro_standard_qwen3_official
+        python -m lmms_eval judge --input_result <result.jsonl> --task mmmu_pro_qwen3_official
     
     This separation allows:
     1. Pure generation without API dependencies
@@ -691,7 +698,7 @@ def mmmu_pro_aggregate_results_official(results: List[Dict]) -> Dict[str, Any]:
         eval_logger.info(f"Total: {len(results)} samples generated")
         eval_logger.info("-" * 50)
         eval_logger.info("To evaluate results, run:")
-        eval_logger.info(f"  python -m lmms_eval judge --input_result <path/to/result.jsonl> --task mmmu_pro_standard_qwen3_official")
+        eval_logger.info(f"  python -m lmms_eval judge --input_result <path/to/result.jsonl> --task mmmu_pro_qwen3_official")
         eval_logger.info("=" * 50)
         
         return {
@@ -723,7 +730,7 @@ def mmmu_pro_aggregate_results_official(results: List[Dict]) -> Dict[str, Any]:
 
 # ==================== Standalone Judge Mode Support ====================
 
-def mmmu_pro_standard_qwen3_official_aggregate_accuracy(extracted_data: List[Dict]) -> float:
+def mmmu_pro_qwen3_official_aggregate_accuracy(extracted_data: List[Dict]) -> float:
     """
     Adapter function for aggregator.
     

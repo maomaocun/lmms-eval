@@ -1,0 +1,4 @@
+group: mmmu_pro_qwen3_official_cot
+task:
+- mmmu_pro_standard_qwen3_official_cot
+- mmmu_pro_vision_qwen3_official_cot

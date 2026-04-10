@@ -86,14 +86,19 @@ def mathvision_doc_to_text_qwen3(doc: Dict, lmms_eval_specific_kwargs: Optional[
         choices_str = ""
     
     mc_prompt = ""
+    post_prompt = ""
     if lmms_eval_specific_kwargs is not None:
         mc_prompt = "\n" + lmms_eval_specific_kwargs.get("mc_prompt", "")
+        post_prompt = lmms_eval_specific_kwargs.get("post_prompt", "")
     
     query_prompt = 'Please solve the problem step by step and put your answer in one "\\boxed{}".'
     if choices_str:
         query_prompt += f"{question}\nChoices: {choices_str}" + mc_prompt
     else:
         query_prompt += question
+    
+    if post_prompt:
+        query_prompt += "\n" + post_prompt
     
     return query_prompt
 
@@ -238,14 +243,19 @@ def mathvision_reason_doc_to_text_qwen3(doc: Dict, lmms_eval_specific_kwargs: Op
         choices_str = ""
     
     mc_prompt = ""
+    post_prompt = ""
     if lmms_eval_specific_kwargs is not None:
         mc_prompt = "\n" + lmms_eval_specific_kwargs.get("mc_prompt", "")
+        post_prompt = lmms_eval_specific_kwargs.get("post_prompt", "")
     
     query_prompt = 'Please solve the problem step by step and put your answer in one "\\boxed{}".'
     if choices_str:
         query_prompt += f"{question}\nChoices: {choices_str}" + mc_prompt
     else:
         query_prompt += question
+    
+    if post_prompt:
+        query_prompt += "\n" + post_prompt
     
     return query_prompt
 

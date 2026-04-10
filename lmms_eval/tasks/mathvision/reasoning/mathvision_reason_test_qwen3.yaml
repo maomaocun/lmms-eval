@@ -27,8 +27,8 @@ generation_kwargs:
 lmms_eval_specific_kwargs:
   default:
     format: "qwen3_vl"
-    # System prompt for reasoning tasks with <think> and <answer> tags
-    system_prompt: "You are a helpful assistant. When the user asks a question, your response must include two parts: first, the reasoning process enclosed in <think>...</think> tags, then the final answer enclosed in <answer>...</answer> tags. Please provide a clear, concise response within <answer> </answer> tags that directly addresses the question."
+    # Reasoning prompt appended to the question to trigger step-by-step reasoning
+    post_prompt: "Think step by step before answering."
     # Official image resolution settings (match Qwen3-VL official repo)
     min_pixels: 1003520  # 1280*28*28 (~1M pixels)
     max_pixels: 4014080  # 5120*28*28 (~4M pixels)
