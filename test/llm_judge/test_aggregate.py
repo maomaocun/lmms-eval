@@ -226,6 +226,55 @@ class TestAggregator:
         config = aggregator._get_special_config("wemath_testmini")
         assert config is not None
     
+    def test_get_special_config_mmbench(self):
+        """Test detection of MMBench special aggregations."""
+        aggregator = Aggregator()
+        
+        for task in ["mmbench_en_dev", "mmbench_en_test", "mmbench_cn_dev", "mmbench_cn_test", "mmbench_ru_dev", "mmbench_ko_dev", "mmbench_cn_cc"]:
+            config = aggregator._get_special_config(task)
+            assert config is not None, f"{task} should have special aggregation"
+            assert "mmbench" in config["module"]
+            assert "accuracy_func" in config
+    
+    def test_get_special_config_sfe(self):
+        """Test detection of SFE special aggregation."""
+        aggregator = Aggregator()
+        
+        config = aggregator._get_special_config("sfe")
+        assert config is not None
+        assert "sfe" in config["module"]
+        assert config["data_key"] == "sfe_info"
+    
+    def test_get_special_config_mathvision_qwen3(self):
+        """Test detection of MathVision Qwen3 special aggregation."""
+        aggregator = Aggregator()
+        
+        config = aggregator._get_special_config("mathvision_testmini_qwen3")
+        assert config is not None
+        assert "utils_qwen3" in config["module"]
+        assert config["data_key"] == "mathvision_qwen3_eval"
+    
+    def test_get_special_config_mmmu_pro(self):
+        """Test detection of MMMU-Pro special aggregation."""
+        aggregator = Aggregator()
+        
+        config = aggregator._get_special_config("mmmu_pro_standard_qwen3_official")
+        assert config is not None
+        assert "mmmu_pro" in config["module"]
+        assert config["data_key"] == "mmmu_pro_acc_official"
+    
+    def test_get_special_config_exclude_patterns(self):
+        """Test that mathvision_reason is excluded from mathvision match."""
+        aggregator = Aggregator()
+        
+        # mathvision_reason should NOT match the generic mathvision config
+        config = aggregator._get_special_config("mathvision_reason_testmini_qwen3")
+        assert config is None
+        
+        # But mathvision_test should still match
+        config = aggregator._get_special_config("mathvision_test")
+        assert config is not None
+    
     def test_aggregate_generic_task(self, generic_samples):
         """Test aggregation for generic tasks."""
         aggregator = Aggregator()
@@ -372,6 +421,68 @@ class TestAggregatorMathVision:
 # -----------------------------------------------------------------------------
 # Test CLI functions
 # -----------------------------------------------------------------------------
+
+class TestAggregatorDictAccuracy:
+    """Tests for accuracy_func returning dict or None."""
+    
+    def test_aggregate_dict_accuracy(self, monkeypatch):
+        """When accuracy_func returns a dict, results should be updated with its contents."""
+        aggregator = Aggregator()
+        
+        # Mock a module with a dict-returning accuracy function
+        mock_module = MagicMock()
+        mock_module.mock_sfe_aggregate = MagicMock(return_value={
+            "exact_match": 0.75,
+            "rouge_score": 0.5,
+        })
+        
+        # Temporarily register a fake special aggregation
+        fake_config = {
+            "module": "mock_sfe_module",
+            "accuracy_func": "mock_sfe_aggregate",
+            "data_key": "sfe_info",
+        }
+        aggregator.SPECIAL_AGGREGATIONS["__test_sfe__"] = fake_config
+        
+        samples = [
+            {"doc_id": 0, "sfe_info": {"id": "1"}},
+            {"doc_id": 1, "sfe_info": {"id": "2"}},
+        ]
+        
+        with patch.object(importlib, "import_module", return_value=mock_module):
+            results = aggregator.aggregate(samples, "__test_sfe__")
+        
+        assert "exact_match" in results
+        assert results["exact_match"] == 0.75
+        assert "rouge_score" in results
+        assert results["rouge_score"] == 0.5
+        # Clean up
+        del aggregator.SPECIAL_AGGREGATIONS["__test_sfe__"]
+    
+    def test_aggregate_none_accuracy(self, monkeypatch):
+        """When accuracy_func returns None (e.g., test splits), results should be empty."""
+        aggregator = Aggregator()
+        
+        mock_module = MagicMock()
+        mock_module.mock_test_aggregate = MagicMock(return_value=None)
+        
+        fake_config = {
+            "module": "mock_test_module",
+            "accuracy_func": "mock_test_aggregate",
+            "data_key": "submission",
+        }
+        aggregator.SPECIAL_AGGREGATIONS["__test_none__"] = fake_config
+        
+        samples = [
+            {"doc_id": 0, "submission": {"index": 1}},
+        ]
+        
+        with patch.object(importlib, "import_module", return_value=mock_module):
+            results = aggregator.aggregate(samples, "__test_none__")
+        
+        assert results == {}
+        del aggregator.SPECIAL_AGGREGATIONS["__test_none__"]
+
 
 class TestTaskDetection:
     """Tests for task name detection from filename."""
@@ -565,8 +676,10 @@ class TestEdgeCases:
             f.write('invalid json line\n')
             f.write('{"doc_id": 1, "metrics": {"accuracy": 0.0}}\n')
         
-        aggregator = Aggregator()
-        samples = aggregator._load_jsonl(test_file)
+        # Aggregator has no _load_jsonl; use standalone JudgeRunner for loading
+        from lmms_eval.llm_judge.standalone import JudgeRunner
+        runner = JudgeRunner()
+        samples = runner._load_jsonl(test_file)
         
         # Should skip invalid line and load 2 valid samples
         assert len(samples) == 2

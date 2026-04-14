@@ -53,11 +53,63 @@ class Aggregator:
             "accuracy_func": "mathvision_aggregate_results_eval",
             "data_key": "mathvision_standard_eval",
             "score_key": "scores",  # Key within data to extract scores
+            "exclude_patterns": ["mathvision_reason"],
+        },
+        "mathvision_testmini_qwen3": {
+            "module": "lmms_eval.tasks.mathvision.utils_qwen3",
+            "accuracy_func": "mathvision_aggregate_results_qwen3",
+            "data_key": "mathvision_qwen3_eval",
+            "score_key": "scores",
         },
         "mmmu_val_qwen3_official": {
             "module": "lmms_eval.tasks.mmmu.utils_qwen3_official",
             "accuracy_func": "mmmu_qwen3_official_aggregate_accuracy",
             "data_key": "mmmu_acc_official",  # Key in metrics to extract data from
+        },
+        "mmmu_pro": {
+            "module": "lmms_eval.tasks.mmmu_pro_qwen3_official.utils_qwen3_official",
+            "accuracy_func": "mmmu_pro_qwen3_official_aggregate_accuracy",
+            "data_key": "mmmu_pro_acc_official",
+        },
+        "mmbench_en_dev": {
+            "module": "lmms_eval.tasks.mmbench.en_utils",
+            "accuracy_func": "mmbench_aggregate_dev_results_eval_standalone",
+            "data_key": "gpt_eval_score",
+        },
+        "mmbench_en_test": {
+            "module": "lmms_eval.tasks.mmbench.en_utils",
+            "accuracy_func": "mmbench_aggregate_test_results_standalone",
+            "data_key": "submission",
+        },
+        "mmbench_cn_dev": {
+            "module": "lmms_eval.tasks.mmbench.cn_utils",
+            "accuracy_func": "mmbench_aggregate_dev_results_eval_standalone",
+            "data_key": "gpt_eval_score",
+        },
+        "mmbench_cn_test": {
+            "module": "lmms_eval.tasks.mmbench.cn_utils",
+            "accuracy_func": "mmbench_aggregate_test_results_standalone",
+            "data_key": "submission",
+        },
+        "mmbench_ru_dev": {
+            "module": "lmms_eval.tasks.mmbench.ru_utils",
+            "accuracy_func": "mmbench_aggregate_dev_results_eval_standalone",
+            "data_key": "gpt_eval_score",
+        },
+        "mmbench_ko_dev": {
+            "module": "lmms_eval.tasks.mmbench.ko_utils",
+            "accuracy_func": "mmbench_aggregate_dev_results_eval_standalone",
+            "data_key": "gpt_eval_score",
+        },
+        "mmbench_cn_cc": {
+            "module": "lmms_eval.tasks.mmbench.cc_utils",
+            "accuracy_func": "mmbench_cn_cc_aggregate_dev_results_eval_standalone",
+            "data_key": "gpt_eval_score",
+        },
+        "sfe": {
+            "module": "lmms_eval.tasks.sfe.utils",
+            "accuracy_func": "sfe_standalone_aggregate",
+            "data_key": "sfe_info",
         },
     }
     
@@ -98,13 +150,15 @@ class Aggregator:
         Returns:
             Special config dict if task needs special handling, None otherwise
         """
+        import re
         task_lower = task_name.lower()
-        for pattern, config in self.SPECIAL_AGGREGATIONS.items():
-            # Use word-boundary matching to avoid false positives
-            # e.g. "wemath" should match "wemath_testmini" but not "mywemathtask"
-            import re
-
+        # Sort by pattern length descending so more specific patterns match first
+        for pattern, config in sorted(self.SPECIAL_AGGREGATIONS.items(), key=lambda x: len(x[0]), reverse=True):
             if re.search(rf"(^|_){re.escape(pattern)}(_|$)", task_lower):
+                # Check exclusion patterns if defined
+                exclude_patterns = config.get("exclude_patterns", [])
+                if any(exc in task_lower for exc in exclude_patterns):
+                    continue
                 return config
         return None
     
@@ -184,8 +238,17 @@ class Aggregator:
             elif "accuracy_func" in config:
                 accuracy_func = getattr(module, config["accuracy_func"])
                 accuracy = accuracy_func(extracted_data)
-                results["accuracy"] = accuracy
-                logger.info(f"Accuracy: {accuracy}%")
+                if isinstance(accuracy, dict):
+                    results.update(accuracy)
+                    if "exact_match" in accuracy:
+                        logger.info(f"exact_match: {accuracy['exact_match']}")
+                    elif "accuracy" in accuracy:
+                        logger.info(f"Accuracy: {accuracy['accuracy']}%")
+                elif accuracy is None:
+                    logger.info("Accuracy function returned None (expected for test splits)")
+                else:
+                    results["accuracy"] = accuracy
+                    logger.info(f"Accuracy: {accuracy}%")
                 
         except ImportError as e:
             logger.error(f"Failed to import aggregation module: {e}")

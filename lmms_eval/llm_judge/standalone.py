@@ -70,7 +70,7 @@ class JudgeRunner:
         """Initialize the judge runner.
         
         Args:
-            judge_mode: Judging mode - "rule", "llm", or "auto" (rule first, LLM fallback)
+            judge_mode: Judging mode - always "auto" (rule first, LLM fallback)
             judge_model: Name of the LLM to use for judging
             judge_api_key: API key for the judge model
             judge_base_url: Base URL for the judge API
@@ -79,12 +79,13 @@ class JudgeRunner:
         self.judge_mode = judge_mode
         self.judge_model = judge_model
         self.judge_api_key = judge_api_key or os.getenv("JUDGE_API_KEY")
-        self.judge_base_url = judge_base_url or os.getenv("JUDGE_BASE_URL", "https://api.openai.com/v1")
+        self.judge_base_url = judge_base_url or os.getenv("JUDGE_BASE_URL") or os.getenv("OPENAI_API_URL") or ""
         self.parallel = parallel
         self._task_manager = None
         self._judge_provider = None
         self._provider_lock = threading.Lock()
         self._current_task_name = None
+        self._current_task = None
         logger.info(
             f"JudgeRunner initialized: mode={self.judge_mode}, model={self.judge_model}, "
             f"base_url={self.judge_base_url}, parallel={self.parallel}"
@@ -109,6 +110,7 @@ class JudgeRunner:
         # Load task and get process_results function
         logger.debug(f"Loading task: {task_name}")
         task = self._load_task(task_name)
+        self._current_task = task
         process_results_fn = task.config.process_results
         
         if process_results_fn is None:
@@ -191,46 +193,48 @@ class JudgeRunner:
         result_sample = sample.copy()
         
         try:
-            # Apply rule-based judging first (if not llm-only mode)
-            if self.judge_mode in ("rule", "auto"):
-                # If doc was dropped and we already have pre-computed metrics in the
-                # sample, reuse them rather than re-running process_results with a
-                # synthetic doc (which will almost always return 0 accuracy).
-                if doc_was_dropped:
-                    existing_metrics = self._extract_existing_metrics(sample)
-                    if existing_metrics:
-                        metrics = existing_metrics
-                        result_sample["metrics"] = metrics
-                        result_sample["judge_mode"] = "rule_existing"
-                    else:
-                        metrics = process_results_fn(doc, filtered_resps)
-                        result_sample["metrics"] = metrics
-                        result_sample["judge_mode"] = "rule"
+            # Step 1: rule-based judging (reuse pre-computed metrics if doc was dropped)
+            if doc_was_dropped:
+                existing_metrics = self._extract_existing_metrics(sample)
+                if existing_metrics:
+                    metrics = existing_metrics
+                    result_sample["metrics"] = metrics
+                    result_sample["judge_mode"] = "rule_existing"
                 else:
-                    try:
-                        metrics = process_results_fn(doc, filtered_resps)
+                    metrics = process_results_fn(doc, filtered_resps)
+                    result_sample["metrics"] = metrics
+                    result_sample["judge_mode"] = "rule"
+            else:
+                try:
+                    metrics = process_results_fn(doc, filtered_resps)
+                    result_sample["metrics"] = metrics
+                    result_sample["judge_mode"] = "rule"
+                except Exception as rule_err:
+                    if self.judge_mode == "auto":
+                        logger.debug(f"Sample {doc_id}: rule-based failed ({rule_err}), trying LLM judge")
+                        metrics = {"rule_error": str(rule_err)}
                         result_sample["metrics"] = metrics
-                        result_sample["judge_mode"] = "rule"
-                    except Exception as rule_err:
-                        if self.judge_mode == "auto":
-                            logger.debug(f"Sample {doc_id}: rule-based failed ({rule_err}), trying LLM judge")
-                            metrics = {"rule_error": str(rule_err)}
-                            result_sample["judge_mode"] = "rule_error"
-                        else:
-                            raise rule_err
-                
-                # Check if we need LLM fallback
-                if self.judge_mode == "auto" and self._needs_llm_judge(metrics):
-                    logger.debug(f"Sample {doc_id}: rule-based score low, trying LLM judge")
-                    llm_metrics = self._apply_llm_judge(doc, filtered_resps, metrics, target=target, sample=sample)
-                    result_sample["metrics"] = llm_metrics
-                    result_sample["judge_mode"] = "llm_fallback"
-
-            elif self.judge_mode == "llm":
-                # LLM-only mode
-                metrics = self._apply_llm_judge(doc, filtered_resps, {}, target=target, sample=sample)
-                result_sample["metrics"] = metrics
-                result_sample["judge_mode"] = "llm"
+                        result_sample["judge_mode"] = "rule_error"
+                    else:
+                        raise rule_err
+            
+            # Step 2: LLM fallback for low-scoring / failed rule-based samples
+            if self._needs_llm_judge(metrics):
+                logger.debug(f"Sample {doc_id}: rule-based score low, trying LLM judge")
+                llm_metrics = self._apply_llm_judge(doc, filtered_resps, metrics, target=target, sample=sample)
+                # Sync llm_judge_score back to the original trigger key so that
+                # task-specific metrics reflect the final result.
+                trigger_key = None
+                for key in ["acc_score", "accuracy", "correct", "score", "exact_match", "gpt_eval_score"]:
+                    if key in metrics and (metrics[key] == 0 or metrics[key] is False or (isinstance(metrics[key], float) and metrics[key] < 0.1)):
+                        trigger_key = key
+                        break
+                # Skip sync for SFE because its _apply_llm_judge block already normalizes exact_match
+                is_sfe = self._current_task_name and "sfe" in self._current_task_name.lower()
+                if trigger_key is not None and "llm_judge_score" in llm_metrics and not is_sfe:
+                    llm_metrics[trigger_key] = llm_metrics["llm_judge_score"]
+                result_sample["metrics"] = llm_metrics
+                result_sample["judge_mode"] = "llm_fallback"
                 
         except Exception as e:
             logger.warning(f"Error judging sample {doc_id}: {e}")
@@ -272,6 +276,101 @@ class JudgeRunner:
             logger.warning("No ground truth answer found in doc, skipping LLM judge")
             return {**fallback_metrics, "llm_judge_skipped": True}
         
+        # Enrich doc for custom prompt generation when it was dropped during serialization
+        if not doc.get("question"):
+            doc = dict(doc)
+            doc["question"] = self._extract_question(doc, sample)
+        if not doc.get("answer") and answer:
+            doc = dict(doc)
+            doc["answer"] = answer
+        
+        # Load task-specific custom prompt if available
+        custom_prompt = None
+        if self._current_task is not None:
+            try:
+                process_results_fn = getattr(self._current_task.config, "process_results", None)
+                if process_results_fn is not None:
+                    task_module_globals = getattr(process_results_fn, "__globals__", {})
+                    get_judge_prompt = task_module_globals.get("get_judge_prompt")
+                    if get_judge_prompt is not None:
+                        custom_prompt = get_judge_prompt(doc, prediction, target)
+                        logger.debug("Using custom judge prompt from task module")
+            except Exception as e:
+                logger.debug(f"Failed to load custom judge prompt: {e}")
+        
+        # SFE-specific 0-10 scoring for mcq/exact_match questions
+        is_sfe = self._current_task_name and "sfe" in self._current_task_name.lower()
+        needs_score = fallback_metrics.get("needs_llm_judge") is True
+        
+        if is_sfe and needs_score:
+            try:
+                formatted_q = fallback_metrics.get("formatted_question", question)
+                ans = fallback_metrics.get("answer", answer)
+                sfe_template = """You are a strict evaluator assessing answer correctness. You must score the model's prediction on a scale from 0 to 10, where 0 represents an entirely incorrect answer and 10 indicates a highly correct answer.
+# Input
+Question:
+```
+{question}
+```
+Ground Truth Answer:
+```
+{answer}
+```
+Model Prediction:
+```
+{pred}
+```
+
+# Evaluation Rules
+- The model prediction may contain the reasoning process, you should spot the final answer from it.
+- For multiple-choice questions: Assign a higher score if the predicted answer matches the ground truth, either by option letters or content. Include partial credit for answers that are close in content.
+- For exact match and open-ended questions:
+  * Assign a high score if the prediction matches the answer semantically, considering variations in format.
+  * Deduct points for partially correct answers or those with incorrect additional information.
+- Ignore minor differences in formatting, capitalization, or spacing since the model may explain in a different way.
+- Treat numerical answers as correct if they match within reasonable precision
+- For questions requiring units, both value and unit must be correct
+
+# Scoring Guide
+Provide a single integer from 0 to 10 to reflect your judgment of the answer's correctness.
+
+# Strict Output format example
+10"""
+                # Use replace() instead of format() to safely handle literal braces in content
+                sfe_prompt = sfe_template.replace("{question}", formatted_q).replace("{answer}", ans).replace("{pred}", prediction)
+                
+                judge_result = self._judge_provider.evaluate_score(
+                    question=formatted_q,
+                    answer=ans,
+                    prediction=prediction,
+                    score_range=(0, 10),
+                    custom_prompt=sfe_prompt,
+                )
+                
+                metrics = fallback_metrics.copy()
+                score = float(judge_result.get("result", 0))
+                metrics["llm_judge_score"] = score
+                metrics["llm_judge_raw"] = judge_result.get("raw_response", "")
+                metrics["llm_judge_model"] = judge_result.get("model", self.judge_model)
+                metrics["llm_judge_success"] = judge_result.get("success", False)
+                metrics["llm_judge_failed"] = False
+                metrics["exact_match"] = score / 10.0
+                
+                # Update sfe_info so aggregate sees the new LLM score
+                if "sfe_info" in metrics:
+                    metrics["sfe_info"] = dict(metrics["sfe_info"])
+                    metrics["sfe_info"]["llm_score"] = [str(int(score))]
+                
+                return metrics
+                
+            except Exception as e:
+                logger.error(f"SFE LLM judge failed: {e}")
+                return {
+                    **fallback_metrics,
+                    "llm_judge_error": str(e),
+                    "llm_judge_failed": True,
+                }
+        
         try:
             # Call LLM judge
             judge_result = self._judge_provider.evaluate_binary(
@@ -279,6 +378,7 @@ class JudgeRunner:
                 answer=answer,
                 prediction=prediction,
                 output_format="0/1",
+                custom_prompt=custom_prompt,
             )
             
             # Merge with fallback metrics
@@ -287,6 +387,7 @@ class JudgeRunner:
             metrics["llm_judge_raw"] = judge_result.get("raw_response", "")
             metrics["llm_judge_model"] = judge_result.get("model", self.judge_model)
             metrics["llm_judge_success"] = judge_result.get("success", False)
+            metrics["llm_judge_failed"] = False
             
             return metrics
             
@@ -296,6 +397,7 @@ class JudgeRunner:
                 **fallback_metrics,
                 "llm_judge_error": str(e),
                 "llm_judge_failed": True,
+                "llm_judge_success": False,
             }
     
     def _init_judge_provider(self) -> None:
@@ -324,9 +426,13 @@ class JudgeRunner:
             if is_local:
                 logger.info(f"Detected local LLM server at {self.judge_base_url}")
             
-            # Set env vars for the provider
+            # Set env vars for the provider.
+            # Note: do NOT overwrite OPENAI_API_URL with a stripped URL,
+            # because downstream task evaluators (e.g. MMBench) may read it
+            # directly and expect the full /chat/completions endpoint.
             os.environ["OPENAI_API_KEY"] = api_key
-            os.environ["OPENAI_API_URL"] = self.judge_base_url
+            if not os.getenv("OPENAI_API_URL"):
+                os.environ["OPENAI_API_URL"] = self.judge_base_url
             
             # Allow overriding API type for local servers
             api_type = os.getenv("JUDGE_API_TYPE", "openai")
@@ -385,13 +491,27 @@ class JudgeRunner:
         """
         metrics = {}
         # Common scalar metrics
-        for key in ["acc_score", "format_score", "accuracy", "correct", "score", "exact_match", "mathvision_qwen3_eval"]:
+        for key in ["acc_score", "format_score", "accuracy", "correct", "score", "exact_match", "mathvision_qwen3_eval", "llm_judge_score"]:
             if key in sample:
                 metrics[key] = sample[key]
+        # Backward compatibility: old JSONL files use api_judge_accuracy as a placeholder
+        if "api_judge_accuracy" in sample:
+            metrics["llm_judge_score"] = sample["api_judge_accuracy"]
+            metrics["needs_llm_judge"] = True
         # Nested metric objects (e.g. wemath_loose / wemath_strict)
         for key in ["wemath_loose", "wemath_strict"]:
             if key in sample:
                 metrics[key] = sample[key]
+        # SFE-specific fields needed for standalone judge and aggregation
+        for key in ["formatted_question", "answer", "question_type",
+                    "sfe_info", "raw_output", "rouge_score", "bertscore", "bleu_score",
+                    "meteor_score", "execute_success_rate", "iou_score", "field", "id"]:
+            if key in sample:
+                metrics[key] = sample[key]
+        # needs_llm_judge must be extracted so that tasks like SFE can enter their
+        # dedicated scoring branch (e.g. 0-10 LLM scoring) during standalone judging.
+        if "needs_llm_judge" in sample:
+            metrics["needs_llm_judge"] = sample["needs_llm_judge"]
         return metrics
     
     def _needs_llm_judge(self, metrics: Dict[str, Any]) -> bool:
@@ -403,8 +523,11 @@ class JudgeRunner:
         Returns:
             True if LLM judge should be applied
         """
+        # Check explicit flag from tasks that defer LLM judging to standalone phase
+        if metrics.get("needs_llm_judge") is True:
+            return True
         # Check common accuracy metrics
-        for key in ["acc_score", "accuracy", "correct", "score", "exact_match"]:
+        for key in ["acc_score", "accuracy", "correct", "score", "exact_match", "gpt_eval_score"]:
             if key in metrics:
                 val = metrics[key]
                 # Consider 0 or False as needing fallback
@@ -496,6 +619,12 @@ class JudgeRunner:
                         if nested_key in val and isinstance(val[nested_key], (int, float)):
                             nested_metric_name = f"{key}.{nested_key}"
                             metric_values.setdefault(nested_metric_name, []).append(float(val[nested_key]))
+                    # Special case: MMBench gpt_eval_score dict contains answer/prediction
+                    if key == "gpt_eval_score" and "answer" in val and "prediction" in val:
+                        ans = val["answer"]
+                        pred = val["prediction"]
+                        if ans is not None and pred is not None:
+                            metric_values.setdefault("accuracy", []).append(1.0 if str(ans) == str(pred) else 0.0)
         
         summary = {}
         for key, values in metric_values.items():
@@ -506,6 +635,9 @@ class JudgeRunner:
         # 1) wemath/mathvision: flat acc_score + llm_judge_score
         # 2) mmmu/mmmu_pro: nested dict with hit + extraction_method + extraction_flag
         
+        # Detect SFE (uses 0-10 scoring, not binary 0/1)
+        is_sfe = any("sfe_info" in r.get("metrics", {}) for r in results[:1] if r)
+        
         # --- Case 1: flat scores ---
         acc_scores = []
         llm_scores = []
@@ -513,10 +645,28 @@ class JudgeRunner:
             metrics = sample.get("metrics", {})
             if "acc_score" in metrics:
                 acc_scores.append(float(metrics["acc_score"]))
-            if "llm_judge_score" in metrics:
+
+            elif "exact_match" in metrics:
+                acc_scores.append(float(metrics["exact_match"]))
+            elif "gpt_eval_score" in metrics and isinstance(metrics["gpt_eval_score"], dict):
+                # MMBench-style dict with answer/prediction
+                gpt_val = metrics["gpt_eval_score"]
+                ans = gpt_val.get("answer")
+                pred = gpt_val.get("prediction")
+                if ans is not None and pred is not None:
+                    acc_scores.append(1.0 if str(ans) == str(pred) else 0.0)
+            if "llm_judge_score" in metrics and metrics["llm_judge_score"] >= 0:
                 llm_scores.append(float(metrics["llm_judge_score"]))
         
-        if acc_scores and llm_scores:
+        if is_sfe and acc_scores:
+            # For SFE, exact_match already encodes the final score
+            # (rouge for open_ended, iou for bbox, llm_score/10 for mcq/exact_match)
+            summary["exact_match"] = round(sum(acc_scores) / len(acc_scores), 4)
+            if llm_scores:
+                summary["llm_judge_score_avg"] = round(sum(llm_scores) / len(llm_scores), 4)
+            # Unify final metric name across all tasks
+            summary["total_acc"] = summary["exact_match"]
+        elif acc_scores and llm_scores:
             rule_acc = sum(acc_scores) / len(acc_scores)
             llm_fallback_acc_raw = sum(llm_scores) / len(llm_scores)
             llm_fallback_acc = (1 - rule_acc) * llm_fallback_acc_raw
@@ -524,6 +674,9 @@ class JudgeRunner:
             summary["rule_acc"] = round(rule_acc, 4)
             summary["llm_fallback_acc"] = round(llm_fallback_acc, 4)
             summary["total_acc"] = round(total_acc, 4)
+        elif llm_scores:
+            # Pure LLM-judge tasks (e.g. MolParse, OpenRxn) have no rule-based score
+            summary["total_acc"] = round(sum(llm_scores) / len(llm_scores), 4)
         
         # --- Case 2: nested official metrics (mmmu / mmmu_pro) ---
         rule_hits = 0.0

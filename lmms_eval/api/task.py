@@ -1244,9 +1244,8 @@ class ConfigurableTask(Task):
             load_dataset_kwargs = dict(dataset_kwargs) if dataset_kwargs is not None else {}
             load_dataset_cache_dir = load_dataset_kwargs.pop("cache_dir", resolved_dataset_cache_dir)
             self._ensure_data_files_cache_compat(load_dataset_kwargs, load_dataset_cache_dir)
-            import pickle
-            print(f"[DEBUG_LMMS_EVAL] task={self.config.task} path={self.DATASET_PATH} name={self.DATASET_NAME} kwargs={load_dataset_kwargs}")
-            print(f"[DEBUG_LMMS_EVAL] download_config local_files_only={download_config.local_files_only} cache_dir={load_dataset_cache_dir}")
+            eval_logger.debug(f"[DEBUG_LMMS_EVAL] task={self.config.task} path={self.DATASET_PATH} name={self.DATASET_NAME} kwargs={load_dataset_kwargs}")
+            eval_logger.debug(f"[DEBUG_LMMS_EVAL] download_config local_files_only={download_config.local_files_only} cache_dir={load_dataset_cache_dir}")
             self.dataset = datasets.load_dataset(
                 path=self.DATASET_PATH,
                 name=self.DATASET_NAME,

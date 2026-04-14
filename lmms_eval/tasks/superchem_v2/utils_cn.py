@@ -4,7 +4,7 @@ import re
 import io
 from PIL import Image
 
-IMAGE_SAVE_DIR = "./superchem_cn_images"
+IMAGE_SAVE_DIR = os.path.join(os.environ.get("HF_DATASETS_CACHE", "."), "superchem_cn_images")
 
 if not os.path.exists(IMAGE_SAVE_DIR):
     os.makedirs(IMAGE_SAVE_DIR, exist_ok=True)

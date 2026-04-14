@@ -4,8 +4,8 @@ import re
 from math_verify import parse, verify
 from openai import OpenAI
 
-API_KEY = os.getenv("JUDGE_API_KEY", "YOUR_API_KEY")
-BASE_URL = os.getenv("JUDGE_BASE_URL", "https://api.openai.com/v1")
+API_KEY = os.getenv("OPENAI_API_KEY") or os.getenv("JUDGE_API_KEY") or ""
+BASE_URL = os.getenv("OPENAI_API_URL") or os.getenv("JUDGE_BASE_URL") or ""
 MODEL_NAME = os.getenv("JUDGE_MODEL_NAME", "gpt-4o-mini")
 USE_LLM_JUDGE = os.getenv("USE_LLM_JUDGE", "False")
 

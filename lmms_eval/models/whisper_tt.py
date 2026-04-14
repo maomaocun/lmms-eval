@@ -13,7 +13,6 @@ from loguru import logger as eval_logger
 from scipy.io import wavfile
 from tqdm import tqdm
 from transformers import AutoProcessor
-
 from lmms_eval import utils
 from lmms_eval.api.instance import Instance
 from lmms_eval.api.model import lmms
@@ -54,7 +53,7 @@ class WhisperTT(lmms):
             eval_logger.warning(f"Ignoring unexpected kwargs: {kwargs}")
 
         # Get base URL from env var or argument
-        self.base_url = base_url or os.getenv("OPENAI_API_BASE", "http://127.0.0.1:8000")
+        self.base_url = base_url or os.getenv("OPENAI_API_URL") or os.getenv("OPENAI_API_BASE", "http://127.0.0.1:8000")
         self.timeout = timeout
         self.max_retries = max_retries
         self.pretrained = pretrained

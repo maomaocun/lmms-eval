@@ -829,13 +829,14 @@ def _gather_object_batched(obj_list, batch_size, world_size, rank, dst=0):
         else:
             batch = []  # Empty batch for ranks that have no more data
         
-        # Gather this batch
+        # Gather this batch on CPU to avoid allocating large serialization tensors on CUDA
         batch_gather_list = [None] * world_size if rank == dst else None
-        torch.distributed.gather_object(
-            obj=batch,
-            object_gather_list=batch_gather_list,
-            dst=dst,
-        )
+        with torch.device("cpu"):
+            torch.distributed.gather_object(
+                obj=batch,
+                object_gather_list=batch_gather_list,
+                dst=dst,
+            )
         
         if rank == dst:
             # Flatten batch results from all ranks (filter out empty lists)
@@ -1030,7 +1031,8 @@ def evaluate(
             reqtype = local_reqtype
             if dist.is_available() and dist.is_initialized():
                 gathered_reqtypes = [None] * world_size
-                dist.all_gather_object(gathered_reqtypes, local_reqtype)
+                with torch.device("cpu"):
+                    dist.all_gather_object(gathered_reqtypes, local_reqtype)
                 reqtype = next((rt for rt in gathered_reqtypes if rt is not None), None)
 
             # compute number of pseudo-batches to pad with (FSDP/DDP require even batches among ranks)
@@ -1045,7 +1047,8 @@ def evaluate(
     if world_size > 1 and dist.is_available() and dist.is_initialized():
         local_reqtypes = list(requests.keys())
         gathered_reqtypes = [None] * world_size
-        dist.all_gather_object(gathered_reqtypes, local_reqtypes)
+        with torch.device("cpu"):
+            dist.all_gather_object(gathered_reqtypes, local_reqtypes)
         canonical_reqtypes = []
         for rank_reqtypes in gathered_reqtypes:
             if not rank_reqtypes:
@@ -1140,7 +1143,8 @@ def evaluate(
         local_filter_keys = list(task.instances[0].filtered_resps.keys()) if task.instances else []
         if WORLD_SIZE > 1 and dist.is_available() and dist.is_initialized():
             gathered_filter_keys = [None] * WORLD_SIZE
-            dist.all_gather_object(gathered_filter_keys, local_filter_keys)
+            with torch.device("cpu"):
+                dist.all_gather_object(gathered_filter_keys, local_filter_keys)
             filter_keys = []
             for rank_keys in gathered_filter_keys:
                 if not rank_keys:
@@ -1292,11 +1296,12 @@ def evaluate(
             # this important when returning many keys from a benchmark, to avoid misalignments between ranks.
             all_metric_keys = list(task_output.sample_metrics.keys())
             gathered_keys = [None] * WORLD_SIZE if RANK == 0 else None
-            torch.distributed.gather_object(
-                obj=all_metric_keys,
-                object_gather_list=gathered_keys,
-                dst=0,
-            )
+            with torch.device("cpu"):
+                torch.distributed.gather_object(
+                    obj=all_metric_keys,
+                    object_gather_list=gathered_keys,
+                    dst=0,
+                )
 
             if RANK == 0:
                 all_keys_set = set()
@@ -1308,7 +1313,8 @@ def evaluate(
                 canonical_keys = None
 
             broadcast_list = [canonical_keys] if RANK == 0 else [None]
-            torch.distributed.broadcast_object_list(broadcast_list, src=0)
+            with torch.device("cpu"):
+                torch.distributed.broadcast_object_list(broadcast_list, src=0)
             canonical_keys = broadcast_list[0]
 
             for metrics in canonical_keys:
@@ -1325,11 +1331,12 @@ def evaluate(
             # gather per_sample_metrics for stability metrics (same canonical ordering)
             all_ps_keys = list(task_output.per_sample_metrics.keys())
             gathered_ps_keys = [None] * WORLD_SIZE if RANK == 0 else None
-            torch.distributed.gather_object(
-                obj=all_ps_keys,
-                object_gather_list=gathered_ps_keys,
-                dst=0,
-            )
+            with torch.device("cpu"):
+                torch.distributed.gather_object(
+                    obj=all_ps_keys,
+                    object_gather_list=gathered_ps_keys,
+                    dst=0,
+                )
 
             if RANK == 0:
                 all_ps_set = set()
@@ -1341,7 +1348,8 @@ def evaluate(
                 canonical_ps_keys = None
 
             broadcast_ps = [canonical_ps_keys] if RANK == 0 else [None]
-            torch.distributed.broadcast_object_list(broadcast_ps, src=0)
+            with torch.device("cpu"):
+                torch.distributed.broadcast_object_list(broadcast_ps, src=0)
             canonical_ps_keys = broadcast_ps[0]
 
             for metrics in canonical_ps_keys:

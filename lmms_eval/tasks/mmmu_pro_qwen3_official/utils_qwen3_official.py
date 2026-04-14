@@ -48,7 +48,7 @@ with open(Path(__file__).parent / "mmmu_pro_standard_qwen3_official.yaml", "r") 
 # API Configuration (Compatible with Qwen3-VL official repository)
 # ============================================================================
 # Supported API types and their environment variables:
-#   - 'compatible': OPENAI_COMPATIBLE_KEY + OPENAI_COMPATIBLE_URL (yunwu.ai, etc.)
+#   - 'compatible': OPENAI_API_KEY + OPENAI_API_URL (yunwu.ai, etc.)
 #   - 'dash': CHATGPT_DASHSCOPE_API_KEY + DASHSCOPE_API_BASE (Aliyun)
 #   - 'openai': OPENAI_API_KEY + OPENAI_API_BASE
 #   - 'kimi': KIMI_API_KEY + KIMI_API_BASE
@@ -76,14 +76,14 @@ def get_api_config():
     api_base = None
     
     if api_type == 'compatible':
-        api_key = os.getenv("OPENAI_COMPATIBLE_KEY", "")
-        api_base = os.getenv("OPENAI_COMPATIBLE_URL", "https://yunwu.ai/v1/chat/completions")
+        api_key = os.getenv("OPENAI_API_KEY", "")
+        api_base = os.getenv("OPENAI_API_URL", "https://yunwu.ai/v1/chat/completions")
     elif api_type == 'dash':
         api_key = os.getenv("CHATGPT_DASHSCOPE_API_KEY", "")
         api_base = os.getenv("DASHSCOPE_API_BASE", "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions")
     elif api_type == 'openai':
         api_key = os.getenv("OPENAI_API_KEY", "")
-        api_base = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1/chat/completions")
+        api_base = os.getenv("OPENAI_API_URL") or os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1/chat/completions")
     elif api_type == 'kimi':
         api_key = os.getenv("KIMI_API_KEY", "")
         api_base = os.getenv("KIMI_API_BASE", "https://api.kimi.com/coding/v1/chat/completions")
@@ -117,8 +117,8 @@ def get_api_config():
         f"   source /mnt/cpfs/yangyicun/Qwen3-VL/evaluation/setup_api_keys.sh\n\n"
         f"2. Or manually set environment variables:\n"
         f"   export API_TYPE=compatible\n"
-        f"   export OPENAI_COMPATIBLE_KEY=your-key\n"
-        f"   export OPENAI_COMPATIBLE_URL=https://yunwu.ai/v1/chat/completions\n\n"
+        f"   export OPENAI_API_KEY=your-key\n"
+        f"   export OPENAI_API_URL=https://yunwu.ai/v1/chat/completions\n\n"
         f"3. Or use local vLLM backend:\n"
         f"   bash examples/judge_process/start_vllm_judge_and_run.sh\n\n"
         f"Current API_TYPE: {api_type}"

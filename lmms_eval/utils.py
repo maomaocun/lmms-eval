@@ -912,7 +912,9 @@ def import_function(loader, node):
     # 1) Try relative file import (original behavior)
     module_path = os.path.normpath(os.path.join(yaml_path, "{}.py".format(module_name)))
     if os.path.exists(module_path):
-        spec = importlib.util.spec_from_file_location(module_name, module_path)
+        # Normalize module name to avoid '../' or './' leaking into logger names (e.g. loguru)
+        actual_module_name = os.path.splitext(os.path.basename(module_path))[0]
+        spec = importlib.util.spec_from_file_location(actual_module_name, module_path)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         function = getattr(module, function_name)

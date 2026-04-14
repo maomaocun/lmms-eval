@@ -12,8 +12,15 @@ from rdkit.Chem import AllChem
 from transformers import BertTokenizerFast
 
 from nltk.translate.bleu_score import corpus_bleu
-from nltk.translate.meteor_score import meteor_score
 from rouge_score import rouge_scorer
+
+# meteor_score requires wordnet; make it optional so missing data doesn't crash evaluation
+try:
+    from nltk.translate.meteor_score import meteor_score
+    _HAS_METEOR = True
+except Exception:
+    meteor_score = None
+    _HAS_METEOR = False
 from sklearn.metrics import roc_auc_score, f1_score, precision_score, recall_score, matthews_corrcoef
 
 from .smiles_canonicalization import canonicalize_molecule_smiles, canonicalize_molecule_smiles_parallel, get_molecule_id
@@ -490,8 +497,11 @@ def calculate_text_metrics(pred_text_list, gold_text_list, text_model='allenai/s
         references.append([gt_tokens])
         hypotheses.append(out_tokens)
 
-        mscore = meteor_score([gt_tokens], out_tokens)
-        meteor_scores.append(mscore)
+        if _HAS_METEOR:
+            mscore = meteor_score([gt_tokens], out_tokens)
+            meteor_scores.append(mscore)
+        else:
+            meteor_scores.append(0.0)
 
     bleu2 = corpus_bleu(references, hypotheses, weights=(.5,.5))
     bleu4 = corpus_bleu(references, hypotheses, weights=(.25,.25,.25,.25))

@@ -29,10 +29,7 @@ runner = JudgeRunner(judge_mode="auto", judge_model="gpt-4o-mini", parallel=8)
 results = runner.judge_file(Path("results.jsonl"), "mathvision_reason_testmini")
 ```
 
-`judge_mode` can be:
-- `rule` — rule-based only (`process_results_fn`)
-- `llm` — LLM-only judging
-- `auto` — rule-based first, then LLM fallback for low-scoring samples
+The framework always runs in `auto` mode: rule-based judging first, then LLM fallback for low-scoring samples.
 
 ### 2.2 Per-Sample Flow (`_judge_sample`)
 
@@ -87,7 +84,7 @@ The evaluation tracker drops the `doc` field before saving JSONL to reduce file 
 
 ### 2.4 LLM Fallback (`_apply_llm_judge`)
 
-When rule-based judging returns `0`/`False` (or when mode is `llm`), the runner calls:
+When rule-based judging returns `0`/`False`, the runner calls:
 
 ```python
 judge_result = self._judge_provider.evaluate_binary(
@@ -98,7 +95,11 @@ judge_result = self._judge_provider.evaluate_binary(
 )
 ```
 
-This is a **generic binary judge**. The current implementation does **not** use task-specific prompt hooks. Tasks that need custom judge prompts (e.g., MMMU official) implement that logic inside their own `process_results` function, not inside the standalone judge framework.
+This is a **generic binary judge** by default. However, the runner also supports a lightweight task-specific prompt hook:
+
+- **`get_judge_prompt(doc, prediction, target) -> str`** — If the task module defines this function, `JudgeRunner` will call it and pass the resulting string as the `custom_prompt` to the binary judge. This is used by chemistry tasks (MolParse, OpenRxn) to inject domain-specific evaluation instructions.
+
+- **SFE exception** — The SFE task uses a custom 0-10 scoring prompt that is currently hard-coded in `standalone.py` rather than via `get_judge_prompt`. It is triggered when `process_results` sets `needs_llm_judge=True` for `mcq` / `exact_match` questions.
 
 The resulting metrics include:
 - `llm_judge_score` — `0` or `1`
@@ -161,11 +162,33 @@ SPECIAL_AGGREGATIONS = {
         "accuracy_func": "mathvision_aggregate_results_eval",
         "data_key": "mathvision_standard_eval",
         "score_key": "scores",
+        "exclude_patterns": ["mathvision_reason"],
+    },
+    "mathvision_testmini_qwen3": {
+        "module": "lmms_eval.tasks.mathvision.utils_qwen3",
+        "accuracy_func": "mathvision_aggregate_results_qwen3",
+        "data_key": "mathvision_qwen3_eval",
+        "score_key": "scores",
     },
     "mmmu_val_qwen3_official": {
         "module": "lmms_eval.tasks.mmmu.utils_qwen3_official",
         "accuracy_func": "mmmu_qwen3_official_aggregate_accuracy",
         "data_key": "mmmu_acc_official",
+    },
+    "mmmu_pro": {
+        "module": "lmms_eval.tasks.mmmu_pro_qwen3_official.utils_qwen3_official",
+        "accuracy_func": "mmmu_pro_qwen3_official_aggregate_accuracy",
+        "data_key": "mmmu_pro_acc_official",
+    },
+    "mmbench_en_dev": {
+        "module": "lmms_eval.tasks.mmbench.en_utils",
+        "accuracy_func": "mmbench_aggregate_dev_results_eval_standalone",
+        "data_key": "gpt_eval_score",
+    },
+    "mmbench_en_test": {
+        "module": "lmms_eval.tasks.mmbench.en_utils",
+        "accuracy_func": "mmbench_aggregate_test_results_standalone",
+        "data_key": "submission",
     },
 }
 ```
@@ -190,26 +213,33 @@ For tasks without special handling:
 
 ## 4. How Task-Specific Judging Actually Works Today
 
-There is **no dynamic hook discovery** in the current `JudgeRunner`. Tasks handle judge-specific behavior in one of two ways:
+Tasks handle judge-specific behavior in one of three ways:
 
 ### 4.1 Inside `process_results`
 
 Tasks like `mmmu_val_qwen3_official` implement their full two-stage pipeline (rule-based extraction + GPT judge) inside `process_results`. When `lmms-eval judge` runs in `auto` or `rule` mode, it simply calls this function.
 
-### 4.2 Generic Binary Fallback
+### 4.2 Generic Binary Fallback (with optional `get_judge_prompt`)
 
-For standard reasoning tasks (MathVision, MathVerse, etc.), `process_results` does rule-based extraction. If it returns `0`, the generic binary LLM judge evaluates the sample. There is no task-specific prompt customization at the framework level.
+For standard reasoning tasks (MathVision, MathVerse, etc.), `process_results` does rule-based extraction. If it returns `0`, the generic binary LLM judge evaluates the sample.
+
+If the task module exports a `get_judge_prompt(doc, prediction, target)` function, `JudgeRunner` will use its return value as the custom prompt for the binary judge. This allows tasks to customize the judge prompt without modifying the framework. MolParse and OpenRxn use this hook to provide chemistry-specific evaluation criteria.
+
+### 4.3 Batch-Scoring Tasks (MMBench)
+
+`mmbench_en_dev` is a special case: its `process_results` function does **not** score samples individually. Instead, it repackages each sample into a `gpt_eval_score` dict. The actual scoring (rule-based extraction + GPT API fallback) happens inside the aggregation function `mmbench_aggregate_dev_results_eval`, which needs the full batch to handle MMBench's rolling-record logic.
+
+Since the fix in `lmms_eval/cli/judge_cmd.py`, `lmms-eval judge` **automatically invokes the `Aggregator`** for tasks registered in `SPECIAL_AGGREGATIONS` (including all MMBench splits). This means:
+
+- Running `lmms-eval judge -i results.jsonl -t mmbench_en_dev` alone will produce the correct accuracy.
+- A separate `lmms-eval aggregate` step is no longer required for MMBench, although the command can still be used standalone if desired.
+- `mmbench_en_test` follows the same pattern but only generates a submission file (no accuracy, since test answers are not public).
 
 ---
 
 ## 5. Note on Historical Design
 
-An earlier design document proposed a `standalone_judge` hook system with:
-- Dynamic discovery of `standalone_judge` callables in task modules
-- A `make_standalone_judge` factory for common reasoning tasks
-- Task-specific prompt injection into `_apply_llm_judge`
-
-This design was documented but **never implemented** in the current `standalone.py`. The architecture described in this document reflects the code that actually runs.
+An earlier design document proposed a full `standalone_judge` hook system with dynamic discovery and a `make_standalone_judge` factory. That full system was never implemented. However, a lightweight task-specific prompt hook (`get_judge_prompt`) **was** later added to `standalone.py` and is actively used by chemistry tasks. The architecture described in this document reflects the code that actually runs.
 
 ---
 
@@ -230,3 +260,5 @@ This design was documented but **never implemented** in the current `standalone.
    ```
 
 3. **If the task relies on the generic binary LLM fallback**, ensure `process_results` returns a low/False score when the answer is wrong so that `auto` mode triggers the fallback correctly.
+
+4. **(Optional) If the task needs a custom binary judge prompt**, export `get_judge_prompt(doc, prediction, target)` from the task module. `JudgeRunner` will detect it and pass the returned string as the custom prompt to the LLM judge.

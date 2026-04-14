@@ -209,7 +209,7 @@ class TestJudgeRunner:
         assert len(lines) == 2
         assert json.loads(lines[0])["id"] == 1
     
-    @patch("lmms_eval.judge.standalone.TaskManager")
+    @patch("lmms_eval.llm_judge.standalone.TaskManager")
     def test_load_task(self, mock_tm_class):
         """Test loading task."""
         mock_tm = MagicMock()
@@ -223,7 +223,7 @@ class TestJudgeRunner:
         assert task == mock_task
         mock_tm.load_task_or_group.assert_called_once_with("test_task")
     
-    @patch("lmms_eval.judge.standalone.TaskManager")
+    @patch("lmms_eval.llm_judge.standalone.TaskManager")
     def test_load_task_error(self, mock_tm_class):
         """Test loading task with error."""
         mock_tm = MagicMock()
@@ -294,7 +294,7 @@ class TestJudgeSample:
 class TestJudgeFile:
     """Tests for the judge_file method."""
     
-    @patch("lmms_eval.judge.standalone.TaskManager")
+    @patch("lmms_eval.llm_judge.standalone.TaskManager")
     def test_judge_file_success(self, mock_tm_class, sample_jsonl):
         """Test successful judging of file."""
         mock_tm = MagicMock()
@@ -312,7 +312,7 @@ class TestJudgeFile:
         assert all("metrics" in r for r in results)
         assert all(r["judge_mode"] == "rule" for r in results)
     
-    @patch("lmms_eval.judge.standalone.TaskManager")
+    @patch("lmms_eval.llm_judge.standalone.TaskManager")
     def test_judge_file_no_process_results(self, mock_tm_class, sample_jsonl):
         """Test judging when task has no process_results."""
         mock_tm = MagicMock()
@@ -327,10 +327,137 @@ class TestJudgeFile:
             runner.judge_file(sample_jsonl, "test_task")
 
 
+class TestExtractExistingMetrics:
+    """Tests for _extract_existing_metrics."""
+    
+    def test_extracts_common_scalars(self):
+        runner = JudgeRunner()
+        sample = {
+            "doc_id": 0,
+            "acc_score": 0.5,
+            "llm_judge_score": 0.0,
+            "format_score": 1.0,
+            "exact_match": 0.0,
+        }
+        metrics = runner._extract_existing_metrics(sample)
+        assert metrics["acc_score"] == 0.5
+        assert metrics["llm_judge_score"] == 0.0
+        assert metrics["format_score"] == 1.0
+        assert metrics["exact_match"] == 0.0
+    
+    def test_extracts_needs_llm_judge(self):
+        """needs_llm_judge must be extracted so that tasks like SFE can enter dedicated scoring."""
+        runner = JudgeRunner()
+        sample = {
+            "doc_id": 0,
+            "needs_llm_judge": True,
+            "gpt_eval_score": 0,
+        }
+        metrics = runner._extract_existing_metrics(sample)
+        assert metrics["needs_llm_judge"] is True
+        assert "gpt_eval_score" not in metrics
+    
+    def test_extracts_sfe_fields(self):
+        runner = JudgeRunner()
+        sample = {
+            "doc_id": 0,
+            "sfe_info": {"id": "x"},
+            "formatted_question": "Q",
+            "answer": "A",
+        }
+        metrics = runner._extract_existing_metrics(sample)
+        assert metrics["sfe_info"]["id"] == "x"
+        assert metrics["formatted_question"] == "Q"
+        assert metrics["answer"] == "A"
+
+    def test_backward_compat_api_judge_accuracy(self):
+        """Old JSONL files with api_judge_accuracy should be mapped to llm_judge_score + needs_llm_judge."""
+        runner = JudgeRunner()
+        sample = {
+            "doc_id": 0,
+            "api_judge_accuracy": 0,
+            "question": "Q",
+        }
+        metrics = runner._extract_existing_metrics(sample)
+        assert metrics["llm_judge_score"] == 0
+        assert metrics["needs_llm_judge"] is True
+        assert "api_judge_accuracy" not in metrics
+
+
+class TestMetricSync:
+    """Tests for llm_judge_score sync back to trigger keys in auto mode."""
+    
+    @patch("lmms_eval.llm_judge.standalone.ProviderFactory")
+    def test_auto_fallback_syncs_llm_judge_score(self, mock_factory_class):
+        """When process_results returns llm_judge_score with needs_llm_judge, fallback updates it directly."""
+        mock_provider = MagicMock()
+        mock_provider.evaluate_binary.return_value = {
+            "result": 1,
+            "raw_response": "Correct",
+            "model": "gpt-4o",
+            "success": True,
+        }
+        mock_factory_class.create_provider.return_value = mock_provider
+        
+        runner = JudgeRunner(judge_mode="auto", judge_api_key="test-key")
+        mock_task = MagicMock()
+        mock_task.config.process_results = MagicMock(return_value={
+            "llm_judge_score": 0,
+            "needs_llm_judge": True,
+            "question": "Q",
+        })
+        
+        sample = {
+            "doc_id": 0,
+            "doc": {"question": "Q", "answer": "A"},
+            "filtered_resps": "A",
+            "target": "A",
+        }
+        result = runner._judge_sample(sample, mock_task, mock_task.config.process_results)
+        
+        assert result["judge_mode"] == "llm_fallback"
+        assert result["metrics"]["llm_judge_score"] == 1
+    
+    @patch("lmms_eval.llm_judge.standalone.ProviderFactory")
+    def test_auto_fallback_skips_sync_for_sfe(self, mock_factory_class):
+        """SFE should not sync llm_judge_score to exact_match because it handles its own normalization."""
+        mock_provider = MagicMock()
+        mock_provider.evaluate_score.return_value = {
+            "result": 7,
+            "raw_response": "7",
+            "model": "gpt-4o",
+            "success": True,
+        }
+        mock_factory_class.create_provider.return_value = mock_provider
+        
+        runner = JudgeRunner(judge_mode="auto", judge_api_key="test-key")
+        runner._current_task_name = "sfe"
+        mock_task = MagicMock()
+        mock_task.config.process_results = MagicMock(return_value={
+            "exact_match": 0.0,
+            "needs_llm_judge": True,
+            "formatted_question": "Q",
+            "answer": "A",
+            "sfe_info": {"id": "1"},
+        })
+        
+        sample = {
+            "doc_id": 0,
+            "doc": {"question": "Q", "answer": "A"},
+            "filtered_resps": "wrong",
+            "target": "A",
+        }
+        result = runner._judge_sample(sample, mock_task, mock_task.config.process_results)
+        
+        assert result["judge_mode"] == "llm_fallback"
+        # exact_match should be set by SFE-specific block (7/10=0.7), not sync logic
+        assert result["metrics"]["exact_match"] == 0.7
+
+
 class TestLLMJudge:
     """Tests for LLM judge functionality."""
     
-    @patch("lmms_eval.judge.standalone.ProviderFactory")
+    @patch("lmms_eval.llm_judge.standalone.ProviderFactory")
     def test_init_judge_provider(self, mock_factory_class):
         """Test initializing judge provider."""
         mock_provider = MagicMock()
@@ -349,14 +476,19 @@ class TestLLMJudge:
         mock_factory_class.create_provider.assert_called_once()
     
     def test_init_judge_provider_no_key(self):
-        """Test initializing without API key."""
+        """Test initializing without API key uses dummy key for local vLLM."""
         runner = JudgeRunner(judge_mode="llm")
         runner.judge_api_key = None
         
-        with pytest.raises(ValueError, match="JUDGE_API_KEY"):
+        # Should not raise; uses dummy key for local servers
+        with patch("lmms_eval.llm_judge.standalone.ProviderFactory") as mock_factory:
+            mock_provider = MagicMock()
+            mock_factory.create_provider.return_value = mock_provider
             runner._init_judge_provider()
+            assert runner._judge_provider is not None
+            mock_factory.create_provider.assert_called_once()
     
-    @patch("lmms_eval.judge.standalone.ProviderFactory")
+    @patch("lmms_eval.llm_judge.standalone.ProviderFactory")
     def test_apply_llm_judge(self, mock_factory_class):
         """Test applying LLM judge."""
         mock_provider = MagicMock()
@@ -389,9 +521,67 @@ class TestLLMJudge:
             answer="4",
             prediction="The answer is 4.",
             output_format="0/1",
+            custom_prompt=None,
         )
     
-    @patch("lmms_eval.judge.standalone.ProviderFactory")
+    def test_apply_llm_judge_with_custom_prompt(self):
+        """Test that get_judge_prompt hook is used when present in task module."""
+        runner = JudgeRunner(judge_mode="llm", judge_api_key="test-key")
+        mock_provider = MagicMock()
+        mock_provider.evaluate_binary.return_value = {
+            "result": 1,
+            "raw_response": "Correct",
+            "model": "gpt-4o",
+            "success": True,
+        }
+        runner._judge_provider = mock_provider
+        
+        mock_process_results = MagicMock()
+        mock_process_results.__globals__ = {
+            "get_judge_prompt": lambda doc, pred, target: "Custom prompt for {question}".format(question=doc.get("question", ""))
+        }
+        mock_task = MagicMock()
+        mock_task.config.process_results = mock_process_results
+        runner._current_task = mock_task
+        
+        doc = {"question": "What is 2+2?", "answer": "4"}
+        results = ["The answer is 4."]
+        metrics = runner._apply_llm_judge(doc, results, {"acc_score": 0})
+        
+        mock_provider.evaluate_binary.assert_called_once()
+        call_kwargs = mock_provider.evaluate_binary.call_args[1]
+        assert call_kwargs["custom_prompt"] == "Custom prompt for What is 2+2?"
+    
+    def test_apply_llm_judge_sfe_scoring(self):
+        """Test SFE-specific 0-10 scoring path in _apply_llm_judge."""
+        runner = JudgeRunner(judge_mode="llm", judge_api_key="test-key")
+        runner._current_task_name = "sfe"
+        mock_provider = MagicMock()
+        mock_provider.evaluate_score.return_value = {
+            "result": 8,
+            "raw_response": "8",
+            "model": "gpt-4o",
+            "success": True,
+        }
+        runner._judge_provider = mock_provider
+        
+        doc = {"question": "Q", "answer": "A"}
+        results = ["pred"]
+        fallback = {
+            "needs_llm_judge": True,
+            "formatted_question": "Q",
+            "answer": "A",
+            "exact_match": 0.0,
+            "sfe_info": {"id": "1"},
+        }
+        metrics = runner._apply_llm_judge(doc, results, fallback)
+        
+        assert metrics["llm_judge_score"] == 8
+        assert metrics["exact_match"] == 0.8
+        assert metrics["sfe_info"]["llm_score"] == ["8"]
+        mock_provider.evaluate_score.assert_called_once()
+    
+    @patch("lmms_eval.llm_judge.standalone.ProviderFactory")
     def test_apply_llm_judge_no_answer(self, mock_factory_class):
         """Test LLM judge when no ground truth answer."""
         runner = JudgeRunner(judge_api_key="test-key")
@@ -405,7 +595,7 @@ class TestLLMJudge:
         assert metrics["llm_judge_skipped"] is True
         runner._judge_provider.evaluate_binary.assert_not_called()
     
-    @patch("lmms_eval.judge.standalone.ProviderFactory")
+    @patch("lmms_eval.llm_judge.standalone.ProviderFactory")
     def test_apply_llm_judge_error(self, mock_factory_class):
         """Test LLM judge when API fails."""
         mock_provider = MagicMock()
@@ -423,3 +613,56 @@ class TestLLMJudge:
         assert metrics["llm_judge_error"] == "API Error"
         assert metrics["llm_judge_failed"] is True
         assert metrics["acc_score"] == 0  # Fallback preserved
+
+
+class TestComputeSummary:
+    """Tests for compute_summary."""
+    
+    def test_compute_summary_sfe(self):
+        """SFE summary should average exact_match and llm_judge_score."""
+        runner = JudgeRunner()
+        results = [
+            {"metrics": {"exact_match": 0.5, "llm_judge_score": 5, "sfe_info": {"id": "1"}}},
+            {"metrics": {"exact_match": 0.8, "llm_judge_score": 8, "sfe_info": {"id": "2"}}},
+        ]
+        summary = runner.compute_summary(results)
+        assert summary["exact_match"] == 0.65
+        assert summary["llm_judge_score_avg"] == 6.5
+        assert summary["total_acc"] == 0.65
+    
+    def test_compute_summary_flat_scores(self):
+        """Standard flat-score summary with rule_acc + llm_fallback_acc."""
+        runner = JudgeRunner()
+        results = [
+            {"metrics": {"acc_score": 1.0, "llm_judge_score": 0}},
+            {"metrics": {"acc_score": 0.0, "llm_judge_score": 1}},
+        ]
+        summary = runner.compute_summary(results)
+        assert summary["rule_acc"] == 0.5
+        assert summary["llm_fallback_acc"] == 0.25
+        assert summary["total_acc"] == 0.75
+    
+    def test_compute_summary_pure_llm_judge_tasks(self):
+        """Pure LLM-judge tasks (e.g. MolParse, OpenRxn) should report total_acc."""
+        runner = JudgeRunner()
+        results = [
+            {"metrics": {"llm_judge_score": 0, "llm_judge_success": True}},
+            {"metrics": {"llm_judge_score": 1, "llm_judge_success": True}},
+            {"metrics": {"llm_judge_score": 1, "llm_judge_success": True}},
+        ]
+        summary = runner.compute_summary(results)
+        assert "rule_acc" not in summary
+        assert "llm_fallback_acc" not in summary
+        assert summary["total_acc"] == 0.6667
+    
+    def test_compute_summary_llm_judge_score(self):
+        """Averages llm_judge_score directly and exposes total_acc for pure LLM-judge tasks."""
+        runner = JudgeRunner()
+        results = [
+            {"metrics": {"llm_judge_score": 0.0}},
+            {"metrics": {"llm_judge_score": 1.0}},
+        ]
+        summary = runner.compute_summary(results)
+        assert summary["llm_judge_score"] == 0.5
+        assert "rule_acc" not in summary
+        assert summary["total_acc"] == 0.5

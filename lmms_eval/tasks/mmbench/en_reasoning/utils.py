@@ -7,14 +7,14 @@ GPT_EVAL_MODEL_NAME = os.getenv("MODEL_VERSION", "gpt-4o-2024-11-20")
 API_TYPE = os.getenv("API_TYPE", "openai")
 
 if API_TYPE == "openai":
-    API_URL = os.getenv("OPENAI_API_URL", "https://api.openai.com/v1/chat/completions")
-    API_KEY = os.getenv("OPENAI_API_KEY", "YOUR_API_KEY")
+    API_URL = os.getenv("OPENAI_API_URL") or ""
+    API_KEY = os.getenv("OPENAI_API_KEY") or ""
 elif API_TYPE == "azure":
     API_URL = os.getenv("AZURE_ENDPOINT", "https://api.cognitive.microsoft.com/sts/v1.0/issueToken")
     API_KEY = os.getenv("AZURE_API_KEY", "YOUR_API_KEY")
 else:
-    API_URL = "YOUR_API_URL"
-    API_KEY = "YOUR_API_KEY"
+    API_URL = os.getenv("OPENAI_API_URL") or ""
+    API_KEY = os.getenv("OPENAI_API_KEY") or ""
 
 
 mmbench_evaluator = MMBench_Evaluator(sys_prompt="", API_KEY=API_KEY, API_URL=API_URL, model_version=GPT_EVAL_MODEL_NAME)

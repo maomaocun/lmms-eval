@@ -16,6 +16,7 @@ Usage:
 """
 
 import os
+import random
 import sys
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -87,6 +88,7 @@ class VLLMBackend(lmms):
         max_frames_num: Maximum number of frames to extract from video
         is_qwen3_vl: Whether the model is Qwen3-VL
         prefix_aware_queue: Whether to use prefix-aware queue ordering
+        shuffle_requests: Whether to randomly shuffle requests before dispatch
     """
     
     is_simple = False
@@ -117,19 +119,15 @@ class VLLMBackend(lmms):
         prefix_aware_queue: bool = True,
         prefix_hash_chars: int = 256,
         chat_template: Optional[str] = None,
+        shuffle_requests: bool = False,
         **kwargs,
     ):
         super().__init__()
         
-        # Disable colors for this model instance only (avoid global side effects at import time)
+        # Disable colors for this model instance only
         os.environ.setdefault('LOGURU_NO_COLOR', '1')
         os.environ.setdefault('NO_COLOR', '1')
         os.environ.setdefault('FORCE_COLOR', '0')
-        try:
-            eval_logger.remove()
-            eval_logger.add(sys.stderr, colorize=False)
-        except Exception:
-            pass
         tqdm.disable_color = True
         
         # Handle base_url - support multiple URLs separated by semicolon
@@ -163,9 +161,14 @@ class VLLMBackend(lmms):
         self.prefix_aware_queue = parse_bool(prefix_aware_queue)
         self.prefix_hash_chars = max(32, int(prefix_hash_chars))
         self.chat_template = chat_template
+        self.shuffle_requests = parse_bool(shuffle_requests)
         
         # Initialize session for connection pooling
+        from requests.adapters import HTTPAdapter
         self.session = requests.Session()
+        adapter = HTTPAdapter(pool_connections=128, pool_maxsize=128)
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
         
         # Setup headers
         self.headers = {
@@ -267,7 +270,9 @@ class VLLMBackend(lmms):
         )
         
         dispatch_order = list(range(len(reordered_requests)))
-        if self.prefix_aware_queue:
+        if self.shuffle_requests:
+            random.shuffle(dispatch_order)
+        elif self.prefix_aware_queue:
             prefix_hashes = {}
             for idx in dispatch_order:
                 req = reordered_requests[idx]
@@ -305,7 +310,7 @@ class VLLMBackend(lmms):
                     result = self._make_request(payload, url)
                     api_latency = time.time() - api_start
                     
-                    eval_logger.debug(f"[Rank {self._rank}] [DEBUG] Request {local_index}: Preprocessing={preproc_time:.3f}s, API_Inference={api_latency:.3f}s")
+                    eval_logger.debug(f"[Rank {self._rank}] Request {local_index}: Preprocessing={preproc_time:.3f}s, API_Inference={api_latency:.3f}s")
                     elapsed = time.time() - started_at
                     
                     # Extract response
@@ -530,7 +535,7 @@ class VLLMBackend(lmms):
                 if not done:
                     no_progress_count += 1
                     if no_progress_count % 10 == 0:  # 每10秒打印一次
-                        eval_logger.info(
+                        eval_logger.debug(
                             f"[Rank {self._rank}] Queue Status | In-flight requests: {len(in_flight)} / "
                             f"Target concurrency: {current_concurrency} | "
                             f"Processing cursor: {cursor}/{len(dispatch_order)}"

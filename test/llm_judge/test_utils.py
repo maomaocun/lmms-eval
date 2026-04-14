@@ -22,6 +22,15 @@ class TestResponseParser:
         assert ResponseParser.parse_binary_response("answer: 1.", "0/1") == 1
         assert ResponseParser.parse_binary_response("answer: 0.", "0/1") == 0
 
+    def test_parse_binary_response_correct_incorrect(self):
+        """Test parsing correct/incorrect synonyms."""
+        assert ResponseParser.parse_binary_response("correct", "0/1") == 1
+        assert ResponseParser.parse_binary_response("Correct", "0/1") == 1
+        assert ResponseParser.parse_binary_response("correct answer", "0/1") == 1
+        assert ResponseParser.parse_binary_response("incorrect", "0/1") == 0
+        assert ResponseParser.parse_binary_response("Incorrect", "0/1") == 0
+        assert ResponseParser.parse_binary_response("incorrect prediction", "0/1") == 0
+
     def test_parse_binary_response_edge_cases(self):
         """Test edge cases that previously caused false positives."""
         # "10" should NOT be treated as 1

@@ -106,7 +106,7 @@ class OpenAICompatible(OpenAICompatibleSimple):
                     api_start = time.time()
                     response = client.chat.completions.create(**payload)
                     api_latency = time.time() - api_start
-                    eval_logger.debug(f"[DEBUG] Request {local_index}: Preprocessing={preproc_time:.3f}s, API_Inference={api_latency:.3f}s")
+                    eval_logger.debug(f"Request {local_index}: Preprocessing={preproc_time:.3f}s, API_Inference={api_latency:.3f}s")
                     elapsed = time.time() - started_at
                     response_text = response.choices[0].message.content
                     input_tokens = 0

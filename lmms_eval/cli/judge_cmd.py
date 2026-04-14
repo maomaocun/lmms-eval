@@ -70,12 +70,6 @@ Examples:
         help="Output directory (batch mode)",
     )
     parser.add_argument(
-        "--judge-mode",
-        choices=["rule", "llm", "auto"],
-        default=os.getenv("JUDGE_MODE", "auto"),
-        help="Judging mode: rule=rule-based only, llm=LLM judge, auto=rule first then LLM fallback (default: from JUDGE_MODE env or auto)",
-    )
-    parser.add_argument(
         "--judge-model",
         default=os.getenv("JUDGE_MODEL", "gpt-4o-mini"),
         help="Judge model name (default: from JUDGE_MODEL env var or gpt-4o-mini)",
@@ -87,7 +81,7 @@ Examples:
     )
     parser.add_argument(
         "--judge-base-url",
-        default=os.getenv("JUDGE_BASE_URL", "https://api.openai.com/v1"),
+        default=os.getenv("JUDGE_BASE_URL") or os.getenv("OPENAI_API_URL") or "",
         help=(
             "Base URL for judge API. "
             "For local vLLM/SGLang: http://localhost:8000/v1 "
@@ -253,6 +247,7 @@ def run_judge(args: argparse.Namespace) -> None:
     # Import here to avoid heavy imports during CLI parsing
     try:
         from lmms_eval.llm_judge.standalone import JudgeRunner
+        from lmms_eval.llm_judge.aggregator import Aggregator
     except ImportError as e:
         eval_logger.error(f"Failed to import JudgeRunner: {e}")
         eval_logger.error("Please ensure lmms-eval is installed: pip install -e .")
@@ -321,7 +316,7 @@ def run_judge(args: argparse.Namespace) -> None:
 
     # Initialize runner
     runner = JudgeRunner(
-        judge_mode=args.judge_mode,
+        judge_mode="auto",
         judge_model=args.judge_model,
         judge_api_key=args.judge_api_key,
         judge_base_url=args.judge_base_url,
@@ -330,7 +325,7 @@ def run_judge(args: argparse.Namespace) -> None:
 
     # Print judge config at the start (same style as normal evaluation)
     eval_logger.info(
-        f"judge ({args.input_result}), judge_mode: ({args.judge_mode}), "
+        f"judge ({args.input_result}), judge_mode: (auto), "
         f"judge_model: ({args.judge_model}), parallel: {args.parallel}"
     )
 
@@ -355,6 +350,18 @@ def run_judge(args: argparse.Namespace) -> None:
 
             # Compute summary
             summary = runner.compute_summary(results)
+
+            # For tasks with special aggregation (e.g. MMBench), run the
+            # task-specific aggregator so that metrics like accuracy reflect
+            # the true scoring logic rather than the generic per-sample mean.
+            try:
+                agg = Aggregator()
+                agg_summary = agg.aggregate(results, task_name)
+                if agg_summary:
+                    summary.update(agg_summary)
+            except Exception as e:
+                eval_logger.debug(f"Task-specific aggregation failed for {task_name}: {e}")
+
             if summary:
                 all_summaries.append((task_name, summary))
 

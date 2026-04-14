@@ -26,8 +26,11 @@ class OpenAIProvider(ServerInterface):
 
     def __init__(self, config: Optional[ServerConfig] = None):
         super().__init__(config)
-        self.api_key = os.getenv("OPENAI_API_KEY", "")
-        raw_api_url = os.getenv("OPENAI_API_URL", "https://api.openai.com/v1/chat/completions")
+        self.api_key = os.getenv("OPENAI_API_KEY") or ""
+        raw_api_url = os.getenv("OPENAI_API_URL") or ""
+        # Strip trailing /chat/completions so the OpenAI client can append it correctly
+        if raw_api_url.endswith("/chat/completions"):
+            raw_api_url = raw_api_url[: -len("/chat/completions")]
         self.api_urls = [u.strip() for u in raw_api_url.split(";") if u.strip()]
 
         self.clients = []

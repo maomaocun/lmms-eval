@@ -143,7 +143,7 @@ class OpenAICompatible(lmms):
 
         # Use provided parameters or fall back to environment variables
         api_key = api_key or os.getenv("OPENAI_API_KEY")
-        base_url = base_url or os.getenv("OPENAI_API_BASE")
+        base_url = base_url or os.getenv("OPENAI_API_URL") or os.getenv("OPENAI_API_BASE")
 
         # Fix URL encoding issue - decode if it's URL encoded
         if base_url and "%" in base_url:
@@ -359,7 +359,7 @@ class OpenAICompatible(lmms):
                     api_start = time.time()
                     response = client.chat.completions.create(**payload)
                     api_latency = time.time() - api_start
-                    eval_logger.debug(f"[DEBUG] Request {local_index}: Preprocessing={preproc_time:.3f}s, API_Inference={api_latency:.3f}s")
+                    eval_logger.debug(f"Request {local_index}: Preprocessing={preproc_time:.3f}s, API_Inference={api_latency:.3f}s")
                     response_text = _normalize_openai_message_content(response.choices[0].message.content)
                     token_counts = None
                     if hasattr(response, "usage") and response.usage:

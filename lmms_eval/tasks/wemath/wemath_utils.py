@@ -48,8 +48,8 @@ def compute_final_scores(metrics, total_count):
         "InsufficientKnowledge_rate": "{:.2%}".format(total_counts["InsufficientKnowledge"] / total_count),
         "CompleteMastery_loose_rate": "{:.2%}".format(total_counts["CompleteMastery_loose"] / total_count),
         "CompleteMastery_strict_rate": "{:.2%}".format(total_counts["CompleteMastery_strict"] / total_count),
-        "RoteMemorization_loose_rate": "{:.2%}".format(total_counts["RoteMemorization_loose"] / (total_counts["CompleteMastery_loose"] + total_counts["RoteMemorization_loose"])),
-        "RoteMemorization_strict_rate": "{:.2%}".format(total_counts["RoteMemorization_strict"] / (total_counts["CompleteMastery_strict"] + total_counts["RoteMemorization_strict"])),
+        "RoteMemorization_loose_rate": "{:.2%}".format(total_counts["RoteMemorization_loose"] / (total_counts["CompleteMastery_loose"] + total_counts["RoteMemorization_loose"]) if (total_counts["CompleteMastery_loose"] + total_counts["RoteMemorization_loose"]) > 0 else 0),
+        "RoteMemorization_strict_rate": "{:.2%}".format(total_counts["RoteMemorization_strict"] / (total_counts["CompleteMastery_strict"] + total_counts["RoteMemorization_strict"]) if (total_counts["CompleteMastery_strict"] + total_counts["RoteMemorization_strict"]) > 0 else 0),
     }
     return total_counts, rates
 

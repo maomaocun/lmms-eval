@@ -93,7 +93,7 @@ class AsyncOpenAIChat(lmms):
         self.work_dir = work_dir if work_dir is not None else tempfile.mkdtemp()
         self.fps = fps
         self.nframes = nframes
-        self.base_url = base_url if base_url is not None else os.getenv("OPENAI_API_BASE")
+        self.base_url = base_url if base_url is not None else (os.getenv("OPENAI_API_URL") or os.getenv("OPENAI_API_BASE"))
         self.api_key = api_key if api_key is not None else os.getenv("OPENAI_API_KEY")
 
         # Support multiple backends via semicolon-separated URLs
@@ -276,7 +276,7 @@ class AsyncOpenAIChat(lmms):
         response = await client.chat.completions.create(**payload)
         api_latency = time.time() - api_start
         preproc_time = api_start - preproc_start
-        eval_logger.debug(f"[DEBUG] Request {idx}: Preprocessing={preproc_time:.3f}s, API_Inference={api_latency:.3f}s")
+        eval_logger.debug(f"Request {idx}: Preprocessing={preproc_time:.3f}s, API_Inference={api_latency:.3f}s")
         
         last_response = response.choices[0].message.content
         # Extract usage metrics

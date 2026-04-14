@@ -15,7 +15,7 @@ from .providers import (
 class ProviderFactory:
     """Factory for creating judge instances based on configuration"""
 
-    _provider_classes = {"openai": OpenAIProvider, "azure": AzureOpenAIProvider, "async_openai": AsyncOpenAIProvider, "async_azure": AsyncAzureOpenAIProvider, "dummy": DummyProvider}
+    _provider_classes = {"openai": OpenAIProvider, "compatible": OpenAIProvider, "azure": AzureOpenAIProvider, "async_openai": AsyncOpenAIProvider, "async_azure": AsyncAzureOpenAIProvider, "dummy": DummyProvider}
 
     # TODO
     # This should actually be a decorator that registers the class

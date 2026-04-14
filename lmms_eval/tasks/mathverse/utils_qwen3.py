@@ -13,7 +13,6 @@ Key features:
 import os
 from typing import Any, Dict, List, Optional
 
-from lmms_eval.tasks.mathverse.mathverse_evals import MathVerseEvaluator
 from lmms_eval.tasks.mathverse.reasoning.utils import (
     SYSTEM_PROMPT as MATHVERSE_REASON_SYSTEM_PROMPT,
     mathverse_doc_to_text as mathverse_reason_doc_to_text,
@@ -28,8 +27,7 @@ from lmms_eval.tasks.mathverse.utils import (
     mathverse_process_results as _mathverse_process_results_orig,
 )
 
-# Initialize evaluator for potential LLM judge fallback
-_mathverse_evaluator = MathVerseEvaluator()
+
 
 
 def _has_judge_api() -> bool:
@@ -89,12 +87,10 @@ def mathverse_qwen3_process_results(doc, results):
     """
     MathVerse Qwen3 result processing.
 
-    Unified logic for both generation mode and standalone judge mode:
-    1. Rule-based matching first (exact / math_verify)
-    2. LLM judge fallback ONLY if API key is configured and rule fails
+    Generation mode: rule-based only, defers LLM judge to standalone phase.
+    Judge mode (when __sample_context__ present): allows LLM judge fallback.
     """
     gt_doc, pred_from_sample = _extract_doc_info(doc)
-
     # Prediction priority: sample wrapper > results list
     if pred_from_sample is not None:
         prediction = str(pred_from_sample).strip()
@@ -107,18 +103,15 @@ def mathverse_qwen3_process_results(doc, results):
         answer = gt_doc.get("target")
 
     judge_result = 0
+    needs_llm_judge = False
     if answer is not None:
         # Stage 1: rule-based matching
         judge_result = int(_rule_match_mathverse(prediction, answer))
 
-        # Stage 2: LLM judge fallback if rule fails and API is available
-        if judge_result == 0 and _has_judge_api():
-            try:
-                judge_result = 1 if _mathverse_evaluator.score_answer(
-                    question, answer, prediction, quick_match=False
-                ) else 0
-            except Exception:
-                pass
+        # Stage 2: defer LLM judge fallback to standalone judge (both generation and judge mode)
+        # This avoids double-judging when lmms-eval judge --judge-mode auto is used.
+        if judge_result == 0:
+            needs_llm_judge = True
 
     result = {
         "sample_index": gt_doc.get("sample_index", gt_doc.get("doc_id", 0)),
@@ -135,7 +128,12 @@ def mathverse_qwen3_process_results(doc, results):
         "true_false": judge_result == 1,
     }
 
-    return {"gpt_eval_score": judge_result, "submission": result}
+    metrics = {"gpt_eval_score": judge_result, "submission": result}
+    if needs_llm_judge:
+        metrics["needs_llm_judge"] = True
+        metrics["formatted_question"] = question
+        metrics["answer"] = answer
+    return metrics
 
 
 # ==================== Standard Version Functions ====================

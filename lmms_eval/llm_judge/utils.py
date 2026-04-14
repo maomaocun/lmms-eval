@@ -15,7 +15,12 @@ class JudgePromptBuilder:
     def build_binary_prompt(question: str, answer: str, prediction: str, output_format: str = "0/1", custom_prompt: Optional[str] = None, **kwargs) -> str:
         """Build prompt for binary evaluation"""
         if custom_prompt:
-            return custom_prompt.format(question=question, answer=answer, pred=prediction, prediction=prediction, **kwargs)
+            try:
+                return custom_prompt.format(question=question, answer=answer, pred=prediction, prediction=prediction, **kwargs)
+            except (KeyError, IndexError, ValueError):
+                # Some task-specific prompts (e.g. chemistry tasks) already embed
+                # the content and may contain curly braces in raw text (SMILES etc.)
+                return custom_prompt
 
         positive, negative = ("1", "0") if output_format == "0/1" or output_format == "1/0" else ("Yes", "No")
 
@@ -53,6 +58,11 @@ class ResponseParser:
         response = response.strip().lower()
 
         if output_format == "0/1" or output_format == "1/0":
+            # Handle common synonyms before regex matching
+            if response.startswith("correct"):
+                return 1
+            if response.startswith("incorrect"):
+                return 0
             # Use regex to avoid matching "10" or "score: 10" as 1
             import re
 

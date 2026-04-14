@@ -100,6 +100,30 @@ Provide a JSON response with scores for each rubric item."""
 
         return {"scores": parsed_result, "raw_response": response.content, "model": response.model_used, "prompt": prompt, "success": response.success}
 
+    def evaluate_score(self, question: str, answer: str, prediction: str, score_range: Tuple[float, float] = (0, 10), custom_prompt: Optional[str] = None, **kwargs) -> Dict[str, Any]:
+        """Evaluate a single score within a range"""
+        if custom_prompt:
+            try:
+                prompt = custom_prompt.format(question=question, answer=answer, prediction=prediction, pred=prediction, **kwargs)
+            except (KeyError, IndexError, ValueError):
+                # Prompt may already be formatted or contain literal braces in content
+                prompt = custom_prompt
+        else:
+            prompt = f"""Evaluate the correctness of the following response on a scale from {score_range[0]} to {score_range[1]}.
+
+Question: {question}
+
+Ground Truth Answer: {answer}
+
+Model Prediction: {prediction}
+
+Provide a single numeric score."""
+
+        request = Request(messages=[{"role": "user", "content": prompt}], question=question, answer=answer, prediction=prediction, config=self.config)
+        response = self.evaluate(request)
+        parsed_result = ResponseParser.parse_score_response(response.content, score_range)
+        return {"result": parsed_result, "raw_response": response.content, "model": response.model_used, "prompt": prompt, "success": response.success}
+
 
 class AsyncServerInterface(ServerInterface):
     """Abstract base class for async judge implementations"""
@@ -228,6 +252,30 @@ class AsyncServerInterface(ServerInterface):
             tasks.append(task)
 
         return await asyncio.gather(*tasks)
+
+    async def evaluate_score_async(self, question: str, answer: str, prediction: str, score_range: Tuple[float, float] = (0, 10), custom_prompt: Optional[str] = None, **kwargs) -> Dict[str, Any]:
+        """Asynchronously evaluate a single score within a range"""
+        if custom_prompt:
+            try:
+                prompt = custom_prompt.format(question=question, answer=answer, prediction=prediction, pred=prediction, **kwargs)
+            except (KeyError, IndexError, ValueError):
+                # Prompt may already be formatted or contain literal braces in content
+                prompt = custom_prompt
+        else:
+            prompt = f"""Evaluate the correctness of the following response on a scale from {score_range[0]} to {score_range[1]}.
+
+Question: {question}
+
+Ground Truth Answer: {answer}
+
+Model Prediction: {prediction}
+
+Provide a single numeric score."""
+
+        request = Request(messages=[{"role": "user", "content": prompt}], question=question, answer=answer, prediction=prediction, config=self.config)
+        response = await self.evaluate_async(request)
+        parsed_result = ResponseParser.parse_score_response(response.content, score_range)
+        return {"result": parsed_result, "raw_response": response.content, "model": response.model_used, "prompt": prompt, "success": response.success}
 
     async def evaluate_with_rubric_async(self, question: str, prediction: str, rubric: Dict[str, Any], **kwargs) -> Dict[str, Any]:
         """Asynchronously evaluate with a custom rubric"""

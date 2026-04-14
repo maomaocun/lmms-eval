@@ -40,8 +40,8 @@ source /mnt/cpfs/yangyicun/Qwen3-VL/evaluation/setup_api_keys.sh
 **Option B: Manual configuration**
 ```bash
 export API_TYPE="compatible"  # or "dash", "openai", "kimi", "mit"
-export OPENAI_COMPATIBLE_KEY="your-key"
-export OPENAI_COMPATIBLE_URL="https://yunwu.ai/v1/chat/completions"
+export OPENAI_API_KEY="your-key"
+export OPENAI_API_URL="https://yunwu.ai/v1/chat/completions"
 export MODEL_VERSION="gpt-4o-mini"
 ```
 
@@ -111,8 +111,8 @@ source /mnt/cpfs/yangyicun/Qwen3-VL/evaluation/setup_api_keys.sh
 ```bash
 # Option 1: yunwu.ai (OpenAI-compatible) - Default
 export API_TYPE="compatible"
-export OPENAI_COMPATIBLE_KEY="your-yunwu-key"
-export OPENAI_COMPATIBLE_URL="https://yunwu.ai/v1/chat/completions"
+export OPENAI_API_KEY="your-yunwu-key"
+export OPENAI_API_URL="https://yunwu.ai/v1/chat/completions"
 
 # Option 2: DashScope (Alibaba Cloud)
 export API_TYPE="dash"
@@ -142,7 +142,7 @@ export MODEL_VERSION="gpt-4o-mini"  # or "gpt-4o", etc.
 
 | API_TYPE | Environment Variables | Description |
 |----------|----------------------|-------------|
-| `compatible` | `OPENAI_COMPATIBLE_KEY` + `OPENAI_COMPATIBLE_URL` | OpenAI-compatible APIs (yunwu.ai, etc.) |
+| `compatible` | `OPENAI_API_KEY` + `OPENAI_API_URL` | OpenAI-compatible APIs (yunwu.ai, etc.) |
 | `dash` | `CHATGPT_DASHSCOPE_API_KEY` + `DASHSCOPE_API_BASE` | Alibaba Cloud DashScope |
 | `openai` | `OPENAI_API_KEY` + `OPENAI_API_BASE` | Official OpenAI API |
 | `kimi` | `KIMI_API_KEY` + `KIMI_API_BASE` | Moonshot Kimi API |

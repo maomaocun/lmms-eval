@@ -1,4 +1,5 @@
 import ast
+import errno
 import json
 import os
 from functools import lru_cache
@@ -75,8 +76,8 @@ if API_TYPE == "vllm_openai":
         api_key=VLLM_API_KEY,
     )
 elif API_TYPE == "openai":
-    API_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-    API_KEY = os.getenv("OPENAI_API_KEY", "YOUR_API_KEY")
+    API_URL = os.getenv("OPENAI_API_URL") or os.getenv("OPENAI_BASE_URL") or ""
+    API_KEY = os.getenv("OPENAI_API_KEY") or ""
     client = OpenAI(base_url=API_URL, api_key=API_KEY)
 elif API_TYPE == "azure":
     API_URL = os.getenv("AZURE_ENDPOINT", "https://api.cognitive.microsoft.com/sts/v1.0/issueToken")
@@ -96,7 +97,7 @@ except ImportError:
     dist = None
 
 
-DOWNLOAD_DIR = "./SFE_images"
+DOWNLOAD_DIR = os.path.join(os.environ.get("HF_DATASETS_CACHE", "."), "SFE_images")
 LOCAL_PREFIX = os.path.join(DOWNLOAD_DIR, "images")
 DONE_FLAG = os.path.join(DOWNLOAD_DIR, ".download_complete")
 
@@ -131,20 +132,39 @@ def ensure_sfe_images_downloaded():
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     lock_path = os.path.join(DOWNLOAD_DIR, ".download.lock")
 
-    with filelock.FileLock(lock_path, timeout=-1):
-        if not images_ready():
-            print("[SFE] images not ready, start downloading...")
-            snapshot_download(
-                repo_id="InternScience/SFE",
-                repo_type="dataset",
-                allow_patterns="images/*",
-                local_dir=DOWNLOAD_DIR,
-                tqdm_class=None,
-            )
-            Path(DONE_FLAG).write_text("ok", encoding="utf-8")
-            print("[SFE] download finished.")
-        else:
-            print("[SFE] images already exist, skip download.")
+    for attempt in range(2):
+        try:
+            with filelock.FileLock(lock_path, timeout=-1):
+                if not images_ready():
+                    print("[SFE] images not ready, start downloading...")
+                    snapshot_download(
+                        repo_id="InternScience/SFE",
+                        repo_type="dataset",
+                        allow_patterns="images/*",
+                        local_dir=DOWNLOAD_DIR,
+                        tqdm_class=None,
+                        max_workers=16,
+                    )
+                    if not images_ready():
+                        raise RuntimeError(
+                            f"SFE images directory is still empty after snapshot_download. "
+                            f"Please check your network (HF_HUB_OFFLINE={os.environ.get('HF_HUB_OFFLINE', 'not set')}) "
+                            f"or manually place images in {LOCAL_PREFIX}"
+                        )
+                    Path(DONE_FLAG).write_text("ok", encoding="utf-8")
+                    print("[SFE] download finished.")
+                else:
+                    print("[SFE] images already exist, skip download.")
+            break
+        except OSError as e:
+            if attempt == 0 and e.errno == errno.ESTALE:
+                eval_logger.warning(f"[SFE] Stale file handle on lock file {lock_path}, removing and retrying...")
+                try:
+                    os.remove(lock_path)
+                except FileNotFoundError:
+                    pass
+                continue
+            raise
 
     if not images_ready():
         raise RuntimeError(
@@ -361,7 +381,21 @@ def sfe_doc_to_visual_doubao(doc):
 
 
 def sfe_process_results(doc, results):
-    question_type = doc["question_type"]
+    # Handle rebuilt doc from standalone judge when doc was dropped during serialization
+    if not doc.get("id") and "__sample_context__" in doc:
+        ctx = doc["__sample_context__"]
+        if isinstance(ctx, dict):
+            doc = {
+                "id": ctx.get("doc_id", ""),
+                "field": ctx.get("field", ""),
+                "question_type": ctx.get("question_type", ""),
+                "answer": ctx.get("answer", ""),
+                "question": ctx.get("question", ""),
+                "options": ctx.get("options", []),
+                "images": ctx.get("image_path", "").split(";") if ctx.get("image_path") else [],
+            }
+
+    question_type = doc.get("question_type", "")
 
     parsed_preds = []
 
@@ -375,16 +409,17 @@ def sfe_process_results(doc, results):
     iou_scores = []
 
     assert len(results) == 1, f"Expected one result, got {len(results)}"
-    
+
     prompt_text = sfe_doc_to_text(doc)
     image_paths_list = _get_local_image_paths(doc)
     image_path_str = ";".join(image_paths_list) if image_paths_list else ""
 
     for pred in results:
         formatted_question = construct_prompt(doc)
-        answer = doc["answer"]
+        answer = doc.get("answer", "")
 
-        if doc["id"].split("/")[0].lower() in ["e011", "e012"]:
+        doc_id = doc.get("id", "")
+        if doc_id and doc_id.split("/")[0].lower() in ["e011", "e012"]:
             answer_bboxs = parse_float_sequence_within(answer)
             pred_bboxs = parse_float_sequence_within(pred)
 
@@ -395,7 +430,7 @@ def sfe_process_results(doc, results):
             else:
                 execute_success_rate.append(0)
                 iou_scores.append(-1)
-            
+
             rough_scores.append(-1)
             bertscore_scores.append(-1)
             bleu_scores.append(-1)
@@ -414,17 +449,17 @@ def sfe_process_results(doc, results):
                     bertscore_scores.append(bertscore)
                 except:
                     bertscore_scores.append(0.)
-                
+
                 try:
                     chencherry = SmoothingFunction()
                     bleu_score = sentence_bleu([answer.strip().split()], pred.strip().split(), smoothing_function=chencherry.method1)
                     bleu_scores.append(bleu_score)
                 except:
                     bleu_scores.append(0.)
-                
+
                 try:
-                    meteor_score = meteor_score([answer.strip().split()], pred.strip().split())
-                    meteor_scores.append(meteor_score)
+                    m_score = meteor_score([answer.strip().split()], pred.strip().split())
+                    meteor_scores.append(m_score)
                 except:
                     meteor_scores.append(0.)
             else:
@@ -433,50 +468,34 @@ def sfe_process_results(doc, results):
                 bleu_scores.append(-1)
                 meteor_scores.append(-1)
 
-            # llm_as_a_judge
-            llm_judge_prompt = JUDGE_RULES.format(question=formatted_question, answer=answer, pred=pred)
-            llm_judge_score = get_chat_response(llm_judge_prompt, max_tokens=20, retries=3)
-            llm_scores.append(llm_judge_score)
-
+            # LLM-as-judge is deferred to the standalone judge phase for decoupled evaluation
+            llm_scores.append(-1)
             execute_success_rate.append(-1)
             iou_scores.append(-1)
 
         parsed_preds.append(pred)
 
-    # === 决定 exact_match 返回哪个分数 ===
+    # === Decide primary score ===
     primary_score = 0.0
+    needs_llm_judge = False
 
-    # 优先提取 LLM Score (0-10) 并归一化到 (0.0-1.0)
-    # 注意：BBox 任务中 llm_scores 为 -1，所以这里会跳过
-    if llm_scores and llm_scores[-1] != -1:
-        try:
-            val = str(llm_scores[-1])
-            # 从返回字符串中提取第一个数字
-            match = re.search(r"(\d+)", val)
-            if match:
-                raw_score = float(match.group(1))
-                primary_score = raw_score / 10.0 # 归一化
-            else:
-                primary_score = 0.0
-        except Exception:
-            primary_score = 0.0
-    
-    # 如果不是 LLM 任务 (即 BBox 任务)，则使用 IoU
-    elif iou_scores and iou_scores[-1] != -1:
+    # BBox tasks use IoU
+    if iou_scores and iou_scores[-1] != -1:
         primary_score = iou_scores[-1]
-    
-    # 兜底：如果都没有，则尝试 Rouge
+    # Open-ended uses Rouge as primary
     elif rough_scores and rough_scores[-1] != -1:
         primary_score = rough_scores[-1]
+    # MCQ / exact_match need LLM judge in standalone phase
+    elif question_type in ("mcq", "exact_match"):
+        primary_score = 0.0
+        needs_llm_judge = True
 
-    # === 构造返回字典 ===
-    
-    all_info = {
-        "id": doc["id"], 
-        "field": doc["field"], 
-        "question_type": doc["question_type"], 
-        "answer": doc["answer"], 
-        "parsed_pred": parsed_preds, 
+    sfe_info = {
+        "id": doc.get("id", ""),
+        "field": doc.get("field", ""),
+        "question_type": question_type,
+        "answer": answer,
+        "parsed_pred": parsed_preds,
         "rouge_score": rough_scores,
         "bertscore": bertscore_scores,
         "bleu_score": bleu_scores,
@@ -486,87 +505,18 @@ def sfe_process_results(doc, results):
         "iou_score": iou_scores,
     }
 
-    rouge_score_info = {
-        "id": doc["id"], 
-        "field": doc["field"], 
-        "question_type": doc["question_type"], 
-        "answer": doc["answer"], 
-        "parsed_pred": parsed_preds, 
-        "rouge_score": rough_scores,
-    }
-
-    bert_score_info = {
-        "id": doc["id"], 
-        "field": doc["field"], 
-        "question_type": doc["question_type"], 
-        "answer": doc["answer"], 
-        "parsed_pred": parsed_preds, 
-        "bertscore": bertscore_scores,
-    }
-
-    bleu_score_info = {
-        "id": doc["id"], 
-        "field": doc["field"], 
-        "question_type": doc["question_type"], 
-        "answer": doc["answer"], 
-        "parsed_pred": parsed_preds, 
-        "bleu_score": bleu_scores,
-    }
-
-    meteor_score_info = {
-        "id": doc["id"], 
-        "field": doc["field"], 
-        "question_type": doc["question_type"], 
-        "answer": doc["answer"], 
-        "parsed_pred": parsed_preds, 
-        "meteor_score": meteor_scores,
-    }
-
-    llm_score_info = {
-        "id": doc["id"], 
-        "field": doc["field"], 
-        "question_type": doc["question_type"], 
-        "answer": doc["answer"], 
-        "parsed_pred": parsed_preds, 
-        "llm_score": llm_scores
-    }
-
-    execute_succ_rate_info = {
-        "id": doc["id"], 
-        "field": doc["field"], 
-        "question_type": doc["question_type"], 
-        "answer": doc["answer"], 
-        "parsed_pred": parsed_preds, 
-        "execute_success_rate": execute_success_rate,
-    }
-
-    iou_score_info = {
-        "id": doc["id"], 
-        "field": doc["field"], 
-        "question_type": doc["question_type"], 
-        "answer": doc["answer"], 
-        "parsed_pred": parsed_preds, 
-        "iou_score": iou_scores,
-    }
-
     return {
         "exact_match": primary_score,
+        "needs_llm_judge": needs_llm_judge,
+        "question_type": question_type,
+        "formatted_question": formatted_question,
+        "answer": answer,
+        "field": doc.get("field", ""),
+        "id": doc.get("id", ""),
+        "sfe_info": sfe_info,
         "raw_output": parsed_preds[0] if parsed_preds else "",
         "question": prompt_text,
         "image_path": image_path_str,
-        # "all_info": all_info, 
-        # "rouge_score": rouge_score_info, 
-        # "bert_score": bert_score_info, 
-        # "bleu_score": bleu_score_info, 
-        # "meteor_score": meteor_score_info, 
-        "llm_score": llm_score_info,
-        # "execute_succ_rate": execute_succ_rate_info,
-        # "iou_score": iou_score_info,
-        # "acc@0.1": iou_score_info,
-        # "acc@0.3": iou_score_info,
-        # "acc@0.5": iou_score_info,
-        # "acc@0.7": iou_score_info,
-        # "acc@0.9": iou_score_info,
     }
 
 
@@ -775,3 +725,68 @@ def sfe_aggregate_acc09_results(results, args):
             eval_logger.warning(f"Failed to convert execute iou score to float for {result['id']}: {result['iou_score'][0]}")
             total_score += 0
     return total_score / total_cnt if total_cnt > 0 else -1
+
+
+def sfe_standalone_aggregate(extracted_data):
+    """Aggregate SFE results for the standalone judge pipeline.
+
+    Args:
+        extracted_data: List of sfe_info dicts extracted from judged samples.
+
+    Returns:
+        Dict of aggregated metrics.
+    """
+    # Compute llm_score only for valid entries (skip -1 placeholders from non-LLM tasks)
+    llm_total = 0
+    llm_cnt = 0
+    for info in extracted_data:
+        val = info.get("llm_score", [-1])[0]
+        if val == -1 or str(val) == "-1":
+            continue
+        try:
+            match = re.search(r"(\d+)", str(val))
+            score = float(match.group(1)) if match else 0.0
+            llm_total += score
+            llm_cnt += 1
+        except Exception:
+            pass
+    llm_score_avg = llm_total / llm_cnt if llm_cnt > 0 else -1
+
+    results = {
+        "rouge_score": sfe_aggregate_rouge_results(extracted_data, None),
+        "bert_score": sfe_aggregate_bertscore_results(extracted_data, None),
+        "bleu_score": sfe_aggregate_bleuscore_results(extracted_data, None),
+        "meteor_score": sfe_aggregate_meteor_score_results(extracted_data, None),
+        "llm_score": llm_score_avg,
+        "execute_succ_rate": sfe_aggregate_execute_succ_rate_results(extracted_data, None),
+        "iou_score": sfe_aggregate_iou_score_results(extracted_data, None),
+        "acc@0.1": sfe_aggregate_acc01_results(extracted_data, None),
+        "acc@0.3": sfe_aggregate_acc03_results(extracted_data, None),
+        "acc@0.5": sfe_aggregate_acc05_results(extracted_data, None),
+        "acc@0.7": sfe_aggregate_acc07_results(extracted_data, None),
+        "acc@0.9": sfe_aggregate_acc09_results(extracted_data, None),
+    }
+
+    # Compute overall exact_match accurately across question types
+    total = 0.0
+    cnt = 0
+    for info in extracted_data:
+        qt = info.get("question_type", "")
+        if qt in ("mcq", "exact_match"):
+            val = info.get("llm_score", [-1])[0]
+            try:
+                match = re.search(r"(\d+)", str(val))
+                score = float(match.group(1)) / 10.0 if match else 0.0
+            except Exception:
+                score = 0.0
+        elif qt == "open_ended":
+            val = info.get("rouge_score", [-1])[0]
+            score = float(val) if val >= 0 else 0.0
+        else:
+            val = info.get("iou_score", [-1])[0]
+            score = float(val) if val >= 0 else 0.0
+        total += score
+        cnt += 1
+
+    results["exact_match"] = total / cnt if cnt > 0 else -1
+    return results

@@ -19,21 +19,44 @@ with open(Path(__file__).parent / "mmbench.yaml", "r") as f:
 
     config = yaml.safe_load("".join(safe_data))
 
-GPT_EVAL_MODEL_NAME = os.getenv("MODEL_VERSION", "gpt-4o-2024-11-20")
+def _resolve_api_url():
+    url = os.getenv("OPENAI_API_URL")
+    if url:
+        if not url.endswith("/chat/completions"):
+            url = url.rstrip("/") + "/chat/completions"
+        return url
+    judge_base = os.getenv("JUDGE_BASE_URL")
+    if judge_base:
+        judge_base = judge_base.split(";")[0].strip()
+        if not judge_base.endswith("/chat/completions"):
+            judge_base = judge_base.rstrip("/") + "/chat/completions"
+        return judge_base
+    return ""
+
+
+GPT_EVAL_MODEL_NAME = os.getenv("MODEL_VERSION") or os.getenv("JUDGE_MODEL", "gpt-4o-2024-11-20")
 API_TYPE = os.getenv("API_TYPE", "openai")
 
 if API_TYPE == "openai":
-    API_URL = os.getenv("OPENAI_API_URL", "https://api.openai.com/v1/chat/completions")
-    API_KEY = os.getenv("OPENAI_API_KEY", "YOUR_API_KEY")
+    API_URL = _resolve_api_url()
+    API_KEY = os.getenv("OPENAI_API_KEY") or os.getenv("JUDGE_API_KEY", "YOUR_API_KEY")
 elif API_TYPE == "azure":
     API_URL = os.getenv("AZURE_ENDPOINT", "https://api.cognitive.microsoft.com/sts/v1.0/issueToken")
-    API_KEY = os.getenv("AZURE_API_KEY", "YOUR_API_KEY")
+    API_KEY = os.getenv("AZURE_API_KEY") or os.getenv("JUDGE_API_KEY", "YOUR_API_KEY")
 else:
     API_URL = "YOUR_API_URL"
-    API_KEY = "YOUR_API_KEY"
+    API_KEY = os.getenv("JUDGE_API_KEY", "YOUR_API_KEY")
 
 
 mmbench_evaluator = MMBench_Evaluator(sys_prompt=config["metadata"]["sys_prompt"], API_KEY=API_KEY, API_URL=API_URL, model_version=GPT_EVAL_MODEL_NAME)
+
+
+def _refresh_mmbench_evaluator():
+    global mmbench_evaluator
+    mmbench_evaluator.API_TYPE = os.getenv("API_TYPE", "openai")
+    mmbench_evaluator.model_version = os.getenv("MODEL_VERSION") or os.getenv("JUDGE_MODEL", "gpt-4o-2024-11-20")
+    mmbench_evaluator.API_KEY = os.getenv("OPENAI_API_KEY") or os.getenv("JUDGE_API_KEY", "YOUR_API_KEY")
+    mmbench_evaluator.API_URL = _resolve_api_url()
 
 
 def mmbench_doc_to_visual(doc):
@@ -99,7 +122,26 @@ def mmbench_process_results(doc, results):
     return data
 
 
+def mmbench_aggregate_dev_results_eval_standalone(results):
+    """Standalone wrapper for mmbench_aggregate_dev_results_eval (no args required)."""
+    class _Args:
+        output_path = "."
+    _refresh_mmbench_evaluator()
+    return mmbench_aggregate_dev_results_eval(results, _Args())
+
+
+def mmbench_aggregate_test_results_standalone(results):
+    """Standalone wrapper for mmbench_aggregate_test_results (no args required)."""
+    class _Args:
+        output_path = "."
+    _refresh_mmbench_evaluator()
+    return mmbench_aggregate_test_results(results, _Args())
+
+
 def mmbench_aggregate_dev_results_eval(results, args):
+    if os.getenv("SKIP_MMBENCH_DEV_JUDGE", "0") == "1":
+        eval_logger.info("SKIP_MMBENCH_DEV_JUDGE=1, skipping GPT-based MMBench dev evaluation during generation.")
+        return 0.0
     print("============= MMBench-CN(Dev) Detailed Results =============")
     overall_acc, category_acc, l2_category_acc = mmbench_evaluator.eval_result(results, eval_method="openai")
     file = generate_submission_file("mmbench_cn_dev_results.json", args)
