@@ -229,3 +229,47 @@ def mathvista_reason_doc_to_messages_qwen3(
     user_content.append({"type": "text", "text": question.strip()})
 
     return system_messages + [{"role": "user", "content": user_content}]
+
+
+def mathvista_reason_qwen3_process_results(doc: Dict, results: List[str]) -> Dict[str, Any]:
+    """
+    Process evaluation results for Qwen3-VL reasoning version of MathVista.
+    Returns acc_score and format_score using compute_score from reasoning_utils.
+    """
+    from lmms_eval.tasks._task_utils.reasoning_utils import compute_score
+
+    acc_score = 0
+    format_score = 0
+
+    # Build question text for extra_info
+    try:
+        default_kwargs = {"shot": 0, "shot_type": "reason-first", "use_caption": False, "use_ocr": False}
+    except Exception:
+        default_kwargs = {"shot": 0, "shot_type": "reason-first", "use_caption": False, "use_ocr": False}
+
+    question = mathvista_reason_doc_to_text_qwen3(doc, default_kwargs)
+    extra_info = {"question": question}
+
+    for pred in results:
+        options = ["A", "B", "C", "D", "E", "F", "G", "H"]
+        choices = doc.get("choices", [])
+        answer = doc.get("answer", "")
+        question_type = doc.get("question_type", "")
+
+        if choices and question_type == "multi_choice" and answer in choices:
+            choice_index = choices.index(answer)
+            ground_truth = options[choice_index]
+        else:
+            ground_truth = answer
+
+        score_dict = compute_score(
+            data_source="mathvista",
+            solution_str=pred.strip(),
+            ground_truth=ground_truth,
+            extra_info=extra_info,
+        )
+        acc_score += score_dict.get("acc_score", 0)
+        format_score += score_dict.get("format_reward_score", 0.0)
+
+    n = len(results) if results else 1
+    return {"acc_score": acc_score / n, "format_score": format_score / n}

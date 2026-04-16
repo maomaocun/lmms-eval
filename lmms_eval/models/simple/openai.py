@@ -149,6 +149,10 @@ class OpenAICompatible(lmms):
         if base_url and "%" in base_url:
             base_url = unquote(base_url)
 
+        # Strip trailing /chat/completions so the OpenAI client can append it correctly
+        if base_url and base_url.endswith("/chat/completions"):
+            base_url = base_url[: -len("/chat/completions")]
+
         # Remove trailing slash if present
         if base_url and base_url.endswith("/"):
             base_url = base_url.rstrip("/")

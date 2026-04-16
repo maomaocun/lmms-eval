@@ -48,11 +48,11 @@ This produces `samples_mmbench_en_dev.jsonl` in your output directory.
 lmms-eval judge \
   --input_result samples_mmbench_en_dev.jsonl \
   --task mmbench_en_dev \
-  --judge-mode rule \
+  \
   --output-dir judged_results/
 ```
 
-`--judge-mode rule` is sufficient here because `process_results` only reformats data; the real scoring happens in the next step.
+Rule-based judging is sufficient here because `process_results` only reformats data; the real scoring happens in the next step.
 
 ### 3. Aggregate (actual scoring)
 
@@ -74,7 +74,7 @@ export JUDGE_OUTPUT_DIR=/path/to/judged_results
 lmms-eval judge \
   --input_result "${JUDGE_RESULT_DIR}"/samples_mmbench_*.jsonl \
   --task auto-detect \
-  --judge-mode rule \
+  \
   --output-dir "${JUDGE_OUTPUT_DIR}"
 
 for task in mmbench_en_dev mmbench_cn_dev mmbench_ru_dev mmbench_ko_dev; do

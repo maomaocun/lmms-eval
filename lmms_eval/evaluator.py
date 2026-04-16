@@ -22,6 +22,21 @@ from tqdm import tqdm
 # before slow ranks (e.g. 1h24m vs 4h24m).  3h was not enough — increase to 24h.
 torch.distributed.distributed_c10d.default_pg_timeout = timedelta(hours=24)
 
+# Lazily-created Gloo process group for CPU-based object collectives.
+# When the default backend is NCCL, torch.distributed.gather_object/all_gather_object
+# allocate large intermediate tensors on CUDA, which OOMs when gathering big objects
+# (e.g., logged samples with media). A Gloo group forces these operations onto CPU.
+_CPU_PG = None
+
+
+def _get_cpu_pg():
+    global _CPU_PG
+    if _CPU_PG is None:
+        if dist.is_available() and dist.is_initialized() and dist.get_backend() == dist.Backend.NCCL:
+            _CPU_PG = dist.new_group(backend="gloo")
+    return _CPU_PG
+
+
 import lmms_eval.api
 import lmms_eval.api.metrics
 import lmms_eval.api.registry
@@ -786,7 +801,7 @@ def _run_generate_until_agentic(
     return responses
 
 
-def _gather_object_batched(obj_list, batch_size, world_size, rank, dst=0):
+def _gather_object_batched(obj_list, batch_size, world_size, rank, dst=0, group=None):
     """Batch gather objects to avoid OOM with large lists.
     
     Args:
@@ -831,12 +846,12 @@ def _gather_object_batched(obj_list, batch_size, world_size, rank, dst=0):
         
         # Gather this batch on CPU to avoid allocating large serialization tensors on CUDA
         batch_gather_list = [None] * world_size if rank == dst else None
-        with torch.device("cpu"):
-            torch.distributed.gather_object(
-                obj=batch,
-                object_gather_list=batch_gather_list,
-                dst=dst,
-            )
+        torch.distributed.gather_object(
+            obj=batch,
+            object_gather_list=batch_gather_list,
+            dst=dst,
+            group=group,
+        )
         
         if rank == dst:
             # Flatten batch results from all ranks (filter out empty lists)
@@ -1031,8 +1046,7 @@ def evaluate(
             reqtype = local_reqtype
             if dist.is_available() and dist.is_initialized():
                 gathered_reqtypes = [None] * world_size
-                with torch.device("cpu"):
-                    dist.all_gather_object(gathered_reqtypes, local_reqtype)
+                dist.all_gather_object(gathered_reqtypes, local_reqtype, group=_get_cpu_pg())
                 reqtype = next((rt for rt in gathered_reqtypes if rt is not None), None)
 
             # compute number of pseudo-batches to pad with (FSDP/DDP require even batches among ranks)
@@ -1047,8 +1061,7 @@ def evaluate(
     if world_size > 1 and dist.is_available() and dist.is_initialized():
         local_reqtypes = list(requests.keys())
         gathered_reqtypes = [None] * world_size
-        with torch.device("cpu"):
-            dist.all_gather_object(gathered_reqtypes, local_reqtypes)
+        dist.all_gather_object(gathered_reqtypes, local_reqtypes, group=_get_cpu_pg())
         canonical_reqtypes = []
         for rank_reqtypes in gathered_reqtypes:
             if not rank_reqtypes:
@@ -1143,8 +1156,7 @@ def evaluate(
         local_filter_keys = list(task.instances[0].filtered_resps.keys()) if task.instances else []
         if WORLD_SIZE > 1 and dist.is_available() and dist.is_initialized():
             gathered_filter_keys = [None] * WORLD_SIZE
-            with torch.device("cpu"):
-                dist.all_gather_object(gathered_filter_keys, local_filter_keys)
+            dist.all_gather_object(gathered_filter_keys, local_filter_keys, group=_get_cpu_pg())
             filter_keys = []
             for rank_keys in gathered_filter_keys:
                 if not rank_keys:
@@ -1284,7 +1296,7 @@ def evaluate(
             if log_samples:
                 # Use batched gather to avoid OOM with large samples containing media data
                 per_rank_samples = list(task_output.logged_samples)
-                gathered_samples = _gather_object_batched(per_rank_samples, batch_size=50, world_size=WORLD_SIZE, rank=RANK, dst=0)
+                gathered_samples = _gather_object_batched(per_rank_samples, batch_size=50, world_size=WORLD_SIZE, rank=RANK, dst=0, group=_get_cpu_pg())
                 
                 if RANK == 0:
                     task_output.logged_samples = gathered_samples
@@ -1296,12 +1308,12 @@ def evaluate(
             # this important when returning many keys from a benchmark, to avoid misalignments between ranks.
             all_metric_keys = list(task_output.sample_metrics.keys())
             gathered_keys = [None] * WORLD_SIZE if RANK == 0 else None
-            with torch.device("cpu"):
-                torch.distributed.gather_object(
-                    obj=all_metric_keys,
-                    object_gather_list=gathered_keys,
-                    dst=0,
-                )
+            torch.distributed.gather_object(
+                obj=all_metric_keys,
+                object_gather_list=gathered_keys,
+                dst=0,
+                group=_get_cpu_pg(),
+            )
 
             if RANK == 0:
                 all_keys_set = set()
@@ -1313,8 +1325,7 @@ def evaluate(
                 canonical_keys = None
 
             broadcast_list = [canonical_keys] if RANK == 0 else [None]
-            with torch.device("cpu"):
-                torch.distributed.broadcast_object_list(broadcast_list, src=0)
+            torch.distributed.broadcast_object_list(broadcast_list, src=0, group=_get_cpu_pg())
             canonical_keys = broadcast_list[0]
 
             for metrics in canonical_keys:
@@ -1324,19 +1335,19 @@ def evaluate(
                     pre_gather = []
 
                 # Use batched gather to avoid OOM with large metric lists
-                gathered_metrics = _gather_object_batched(pre_gather, batch_size=100, world_size=WORLD_SIZE, rank=RANK, dst=0)
+                gathered_metrics = _gather_object_batched(pre_gather, batch_size=100, world_size=WORLD_SIZE, rank=RANK, dst=0, group=_get_cpu_pg())
                 if RANK == 0:
                     task_output.sample_metrics[metrics] = gathered_metrics
 
             # gather per_sample_metrics for stability metrics (same canonical ordering)
             all_ps_keys = list(task_output.per_sample_metrics.keys())
             gathered_ps_keys = [None] * WORLD_SIZE if RANK == 0 else None
-            with torch.device("cpu"):
-                torch.distributed.gather_object(
-                    obj=all_ps_keys,
-                    object_gather_list=gathered_ps_keys,
-                    dst=0,
-                )
+            torch.distributed.gather_object(
+                obj=all_ps_keys,
+                object_gather_list=gathered_ps_keys,
+                dst=0,
+                group=_get_cpu_pg(),
+            )
 
             if RANK == 0:
                 all_ps_set = set()
@@ -1348,8 +1359,7 @@ def evaluate(
                 canonical_ps_keys = None
 
             broadcast_ps = [canonical_ps_keys] if RANK == 0 else [None]
-            with torch.device("cpu"):
-                torch.distributed.broadcast_object_list(broadcast_ps, src=0)
+            torch.distributed.broadcast_object_list(broadcast_ps, src=0, group=_get_cpu_pg())
             canonical_ps_keys = broadcast_ps[0]
 
             for metrics in canonical_ps_keys:
@@ -1359,7 +1369,7 @@ def evaluate(
                     pre_gather = []
 
                 # Use batched gather to avoid OOM with large metric lists
-                gathered_metrics = _gather_object_batched(pre_gather, batch_size=100, world_size=WORLD_SIZE, rank=RANK, dst=0)
+                gathered_metrics = _gather_object_batched(pre_gather, batch_size=100, world_size=WORLD_SIZE, rank=RANK, dst=0, group=_get_cpu_pg())
                 if RANK == 0:
                     task_output.per_sample_metrics[metrics] = gathered_metrics
 

@@ -17,7 +17,7 @@
 - Each sample now carries a structured `sfe_info` dict (containing `id`, `field`, `question_type`, `answer`, `parsed_pred`, and all per-metric arrays) so that aggregation can run offline later.
 
 ### 2. Judge Phase (`lmms-eval judge`)
-- Works in `--judge-mode auto` (recommended), `rule`, or `llm`.
+- Works in `auto` mode (recommended), `rule`, or `llm`.
 - For `open_ended` and `BBox` tasks, rule-based scores are reused directly.
 - For `mcq` / `exact_match`, the `JudgeRunner` detects `needs_llm_judge=True` and calls a **0–10 score judge** (`evaluate_score`) using the task-specific SFE prompt. The returned score is normalized to `0.0–1.0` and written back into `exact_match`.
 - When the original `doc` was dropped from the JSONL (standard tracker behavior), `sfe_process_results` automatically rebuilds the minimal doc from `__sample_context__` so judging can still rerun.
@@ -50,7 +50,7 @@ lmms-eval \
 # 2. Standalone judge
 lmms-eval judge \
   -i "eval_result/*_samples_sfe-*.jsonl" \
-  --judge-mode auto \
+  \
   --judge-model gpt-4o-mini \
   --parallel 8 \
   --output-dir judged_results/
@@ -84,4 +84,4 @@ lmms-eval aggregate \
 ## Notes
 - Both `sfe-en` and `sfe-zh` share the same `utils.py`, so both are adapted simultaneously.
 - The original inline LLM client (`get_chat_response` with hard-coded `MODEL_VERSION`) is **no longer used** during normal evaluation; you control the judge model via `--judge-model` and `--judge-base-url` in the judge step.
-- If you only want to rerun rule metrics, use `--judge-mode rule`. `mcq` / `exact_match` will keep `exact_match=0` and will not be LLM-scored.
+- If you only want to rerun rule metrics, pass `--judge-model none` or rely on the built-in rule-only behavior. `mcq` / `exact_match` will keep `exact_match=0` and will not be LLM-scored.

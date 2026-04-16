@@ -5,7 +5,7 @@ without regeneration. It separates the generation and judging phases completely.
 
 Usage:
     lmms-eval judge --input results.jsonl --task mathvision_reason_testmini
-    lmms-eval judge -i "*.jsonl" --judge-mode llm --judge-model gpt-4o
+    lmms-eval judge -i "*.jsonl" --judge-model gpt-4o
 """
 
 import argparse
@@ -44,7 +44,7 @@ Examples:
     lmms-eval judge -i /path/to/results/ -t mathvision_test,wemath_testmini_reasoning
 
     # Use LLM judge
-    lmms-eval judge -i results.jsonl --judge-mode llm --judge-model gpt-4o
+    lmms-eval judge -i results.jsonl --judge-model gpt-4o
 
     # Batch process with output directory
     lmms-eval judge --input_result "results/*.jsonl" -d judged/ --parallel 8
@@ -95,6 +95,16 @@ Examples:
         help="Number of parallel judge workers (default: from JUDGE_MAX_CONCURRENT env or 1)",
     )
     parser.add_argument(
+        "--mode",
+        choices=["auto", "judge", "score"],
+        default="auto",
+        help=(
+            "Operation mode. 'judge' runs LLM-as-judge (legacy behavior). "
+            "'score' re-runs task.process_results + aggregation from saved JSONL without inference. "
+            "'auto' detects request-failure markers and falls back to 'score' when needed."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Dry run without saving results",
@@ -134,6 +144,32 @@ def _detect_task_from_filename(filename: str) -> str:
         f"Cannot auto-detect task from filename: {filename}. "
         f"Expected pattern: *_samples_{{task}}.jsonl"
     )
+
+
+def _detect_mode_from_files(judge_items: List[Tuple[str, Path]]) -> str:
+    """Auto-detect whether we should run in judge or score mode.
+    
+    If any sample contains a request-failure marker (e.g. HTTP 404),
+    we need to recompute metrics from scratch => score mode.
+    Otherwise we assume the JSONL already has valid per-sample metrics
+    and we can proceed with judge/aggregation => judge mode.
+    """
+    import json
+    for _task_name, input_file in judge_items:
+        try:
+            with open(input_file, "r", encoding="utf-8") as f:
+                for _ in range(5):  # inspect first 5 lines only
+                    line = f.readline()
+                    if not line:
+                        break
+                    sample = json.loads(line)
+                    resp = sample.get("filtered_resps", "")
+                    if isinstance(resp, str) and "[LMMS_EVAL_REQUEST_FAILED" in resp:
+                        return "score"
+                    # Also switch to score if all existing metrics are 0/NaN for multiple samples
+        except Exception:
+            continue
+    return "judge"
 
 
 def _resolve_input_files(input_result: str, task_list: List[str]) -> List[Tuple[str, Path]]:
@@ -248,6 +284,7 @@ def run_judge(args: argparse.Namespace) -> None:
     try:
         from lmms_eval.llm_judge.standalone import JudgeRunner
         from lmms_eval.llm_judge.aggregator import Aggregator
+        from lmms_eval.llm_judge.scorer import score_file
     except ImportError as e:
         eval_logger.error(f"Failed to import JudgeRunner: {e}")
         eval_logger.error("Please ensure lmms-eval is installed: pip install -e .")
@@ -314,20 +351,29 @@ def run_judge(args: argparse.Namespace) -> None:
     for task_name, input_file in judge_items:
         eval_logger.info(f"  [{task_name}] -> {input_file}")
 
-    # Initialize runner
-    runner = JudgeRunner(
-        judge_mode="auto",
-        judge_model=args.judge_model,
-        judge_api_key=args.judge_api_key,
-        judge_base_url=args.judge_base_url,
-        parallel=args.parallel,
-    )
+    # Determine effective mode for auto
+    effective_mode = args.mode
+    if effective_mode == "auto":
+        effective_mode = _detect_mode_from_files(judge_items)
+        eval_logger.info(f"Auto-detected mode: {effective_mode}")
 
-    # Print judge config at the start (same style as normal evaluation)
-    eval_logger.info(
-        f"judge ({args.input_result}), judge_mode: (auto), "
-        f"judge_model: ({args.judge_model}), parallel: {args.parallel}"
-    )
+    runner = None
+    if effective_mode == "judge":
+        runner = JudgeRunner(
+            judge_mode="auto",
+            judge_model=args.judge_model,
+            judge_api_key=args.judge_api_key,
+            judge_base_url=args.judge_base_url,
+            parallel=args.parallel,
+        )
+        eval_logger.info(
+            f"judge ({args.input_result}), judge_mode: (auto), "
+            f"judge_model: ({args.judge_model}), parallel: {args.parallel}"
+        )
+    else:
+        eval_logger.info(
+            f"score ({args.input_result}), output_dir: ({args.output_dir})"
+        )
 
     # Process each file
     success_count = 0
@@ -345,32 +391,46 @@ def run_judge(args: argparse.Namespace) -> None:
                 continue
 
         try:
-            # Run judging
-            results = runner.judge_file(input_file, task_name)
+            if effective_mode == "score":
+                # Offline re-scoring: re-run process_results + aggregation
+                output_dir = Path(args.output_dir) if args.output_dir else None
+                results_dict, _ = score_file(
+                    input_file,
+                    task_name,
+                    output_path=output_dir,
+                    verbose=args.verbose,
+                )
+                if results_dict and task_name in results_dict.get("results", {}):
+                    summary = dict(results_dict["results"][task_name])
+                    all_summaries.append((task_name, summary))
+                success_count += 1
+            else:
+                # Run judging
+                results = runner.judge_file(input_file, task_name)
 
-            # Compute summary
-            summary = runner.compute_summary(results)
+                # Compute summary
+                summary = runner.compute_summary(results)
 
-            # For tasks with special aggregation (e.g. MMBench), run the
-            # task-specific aggregator so that metrics like accuracy reflect
-            # the true scoring logic rather than the generic per-sample mean.
-            try:
-                agg = Aggregator()
-                agg_summary = agg.aggregate(results, task_name)
-                if agg_summary:
-                    summary.update(agg_summary)
-            except Exception as e:
-                eval_logger.debug(f"Task-specific aggregation failed for {task_name}: {e}")
+                # For tasks with special aggregation (e.g. MMBench), run the
+                # task-specific aggregator so that metrics like accuracy reflect
+                # the true scoring logic rather than the generic per-sample mean.
+                try:
+                    agg = Aggregator()
+                    agg_summary = agg.aggregate(results, task_name)
+                    if agg_summary:
+                        summary.update(agg_summary)
+                except Exception as e:
+                    eval_logger.debug(f"Task-specific aggregation failed for {task_name}: {e}")
 
-            if summary:
-                all_summaries.append((task_name, summary))
+                if summary:
+                    all_summaries.append((task_name, summary))
 
-            # Save results
-            if not args.dry_run:
-                output_path = _get_output_path(input_file, args.output, args.output_dir)
-                runner.save_results(results, output_path)
+                # Save results
+                if not args.dry_run:
+                    output_path = _get_output_path(input_file, args.output, args.output_dir)
+                    runner.save_results(results, output_path)
 
-            success_count += 1
+                success_count += 1
 
         except Exception as e:
             eval_logger.error(f"Error processing {input_file}: {e}")

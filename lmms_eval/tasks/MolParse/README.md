@@ -34,7 +34,7 @@ lmms-eval eval \
 lmms-eval judge \
   -i results/*_samples_MolParse.jsonl \
   -t MolParse \
-  --judge-mode auto \
+  \
   --judge-model gpt-4o-mini \
   --parallel 8 \
   -d judged_results/

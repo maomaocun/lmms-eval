@@ -36,13 +36,16 @@ load_config() {
         apt-get update -qq && apt-get install -y -qq jq || { echo "[ERROR] Failed to install jq."; exit 1; }
     fi
 
-    # source setup script if configured
-    SETUP_SCRIPT=$(cfg '.env.setup_script // ""')
-    if [[ -n "${SETUP_SCRIPT}" && "${SETUP_SCRIPT}" != "null" && -f "${SETUP_SCRIPT}" ]]; then
-        source "${SETUP_SCRIPT}"
-    fi
-
     # environment
+    API_TYPE=$(cfg '.env.api_type // ""')
+    [[ -n "${API_TYPE}" && "${API_TYPE}" != "null" ]] && export API_TYPE="${API_TYPE}"
+
+    OPENAI_API_KEY=$(cfg '.env.openai_api_key // ""')
+    [[ -n "${OPENAI_API_KEY}" && "${OPENAI_API_KEY}" != "null" ]] && export OPENAI_API_KEY="${OPENAI_API_KEY}"
+
+    OPENAI_API_URL=$(cfg '.env.openai_api_url // ""')
+    [[ -n "${OPENAI_API_URL}" && "${OPENAI_API_URL}" != "null" ]] && export OPENAI_API_URL="${OPENAI_API_URL}"
+
     export HF_HOME=$(cfg '.env.hf_home')
     export HF_TOKEN=$(cfg '.env.hf_token')
     export HF_DATASETS_CACHE="${HF_HOME}/datasets"

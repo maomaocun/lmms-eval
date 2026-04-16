@@ -13,7 +13,7 @@ This directory contains the English reasoning variant of MMBench.
 
 Unlike the base (non-reasoning) MMBench tasks, the reasoning variant's `process_results` function returns scalar metrics (`acc_score`, `format_score`) for each sample. This means:
 
-- `lmms-eval judge --judge-mode auto` will rule-score each sample and, if needed, fall back to the generic binary LLM judge.
+- `lmms-eval judge` will rule-score each sample and, if needed, fall back to the generic binary LLM judge.
 - The summary printed at the end of `judge` is already the final result.
 - You **do not** need to run `lmms-eval aggregate` for these tasks.
 
@@ -25,7 +25,7 @@ Unlike the base (non-reasoning) MMBench tasks, the reasoning variant's `process_
 lmms-eval judge \
   --input_result samples_mmbench_en_dev_reasoning.jsonl \
   --task mmbench_en_dev_reasoning \
-  --judge-mode auto \
+  \
   --output-dir judged_results/
 ```
 

@@ -109,7 +109,7 @@ def mathverse_qwen3_process_results(doc, results):
         judge_result = int(_rule_match_mathverse(prediction, answer))
 
         # Stage 2: defer LLM judge fallback to standalone judge (both generation and judge mode)
-        # This avoids double-judging when lmms-eval judge --judge-mode auto is used.
+        # This avoids double-judging when lmms-eval judge is used in auto mode.
         if judge_result == 0:
             needs_llm_judge = True
 

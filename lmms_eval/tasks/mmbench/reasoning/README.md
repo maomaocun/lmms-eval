@@ -28,7 +28,7 @@ Because the scores are already produced per-sample, the standalone `lmms-eval ju
 lmms-eval judge \
   --input_result samples_mmbench_cn_dev_reasoning.jsonl \
   --task mmbench_cn_dev_reasoning \
-  --judge-mode auto \
+  \
   --output-dir judged_results/
 ```
 
@@ -44,7 +44,7 @@ Look for `metrics.acc_score` in each JSON line.
 
 ## Environment Variables
 
-When `--judge-mode auto` triggers the generic binary LLM fallback, the following env vars are respected:
+When the generic binary LLM fallback is triggered, the following env vars are respected:
 
 | Variable | Purpose | Default |
 |----------|---------|---------|

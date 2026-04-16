@@ -1,0 +1,60 @@
+{
+  "_comment": "lmms-eval Judge 配置文件 - 支持 API 和 vLLM 两种后端",
+  
+  "env": {
+    "hf_home": "/mnt/cpfs/public_data/public_dataset/.cache/huggingface",
+    "hf_token": "",
+    "venv_path": "/mnt/cpfs/<USER>/lmms-eval/.venv",
+    "lmms_eval_datasets_cache": "/tmp/lmms_eval_hf_datasets/root",
+    "hf_datasets_offline": true,
+    "transformers_offline": true
+  },
+  
+  "log": {
+    "dir": "/mnt/cpfs/<USER>/judge_logs"
+  },
+  
+  "judge": {
+    "_comment_backend": "选择 judge 后端: 'api' 使用 OpenAI 兼容 API, 'vllm' 启动本地 vLLM",
+    "backend": "api",
+    
+    
+    "_comment_parallel": "并行 judge 的 worker 数量",
+    "parallel": 128,
+    
+    "_comment_model": "当使用 API 后端时的 judge 模型名称",
+    "model": "gpt-4o-mini",
+    
+    "api": {
+      "_comment": "API 后端配置 (backend=api 时生效). 建议通过环境变量 OPENAI_API_KEY / OPENAI_API_BASE 或 JUDGE_API_KEY / JUDGE_BASE_URL 注入，而不是写死在这里",
+      "key": "",
+      "base_url": ""
+    },
+    
+    "vllm": {
+      "_comment": "vLLM 后端配置 (backend=vllm 时生效)",
+      "model_path": "/mnt/cpfs/public_data/public_model/Qwen3.5/Qwen3.5-27B",
+      "tp": 4,
+      "max_model_len": 32768,
+      "gpu_memory_utilization": "0.9",
+      "max_num_seqs": 512,
+      "port": 8002
+    }
+  },
+  
+  "eval": {
+    "_comment_input": "输入路径: 可以是包含 *samples_*.jsonl 文件的目录，或单个 jsonl 文件",
+    "input_result_path": "/mnt/cpfs/<USER>/lmms-eval/eval_result/2026-04-14_22-56-25/Qwen3-VL-8B-Instruct",
+    
+    "_comment_tasks": "要 judge 的 task 列表，逗号分隔。会从 input_result_path 中查找 *samples_<task>.jsonl 文件",
+    "tasks": "mmbench_en_dev,MolParse,OpenRxn,sfe-en,sfe-zh,mmmu_val_qwen3_official,mmmu_pro_standard_reasoning_qwen3_official",
+    
+    "_comment_output": "judge 结果输出目录",
+    "output_path": "/mnt/cpfs/<USER>/judge_results",
+    
+    "verbosity": "INFO",
+    
+    "_comment_debug": "Debug 模式: true 时不会自动清理 vLLM 进程",
+    "debug": true
+  }
+}

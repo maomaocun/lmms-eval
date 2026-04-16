@@ -2,8 +2,8 @@
   "dlc": {
     "submit": true,
     "job_name": "test_eval_jobs",
-    "binary": "/mnt/cpfs/yangyicun/dlc",
-    "run_script": "/mnt/cpfs/yangyicun/lmms-eval/scripts/qwen3_vl_worker.sh",
+    "binary": "/mnt/cpfs/<USER>/dlc",
+    "run_script": "/mnt/cpfs/<USER>/lmms-eval/scripts/qwen3_vl_worker.sh",
     "workers": 2,
     "worker_gpu": 8,
     "worker_cpu": 110,
