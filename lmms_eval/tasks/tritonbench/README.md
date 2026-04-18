@@ -42,17 +42,30 @@ the spec for this adaptation only requires the two correctness metrics.
 
 ## Cache & runtime knobs
 
-| Env var                       | Default                              | Effect |
-| ----------------------------- | ------------------------------------ | ------ |
-| `LMMS_TRITONBENCH_CACHE`      | `~/.cache/lmms_eval/tritonbench`     | Where to cache gold reference files. |
-| `LMMS_TRITONBENCH_TIMEOUT`    | `120` (seconds)                      | Per-script subprocess timeout. |
-| `LMMS_TRITONBENCH_DRY_RUN`    | unset                                | When truthy, skip subprocess execution and report `0` for both metrics. Useful for smoke tests of the pipeline without CUDA. |
+| Env var                              | Default                                                  | Effect |
+| ------------------------------------ | -------------------------------------------------------- | ------ |
+| `LMMS_TRITONBENCH_CACHE`             | `~/.cache/lmms_eval/tritonbench`                         | Where to cache upstream data files. |
+| `LMMS_TRITONBENCH_TIMEOUT`           | `120` (seconds)                                          | Per-script subprocess timeout. |
+| `LMMS_TRITONBENCH_DRY_RUN`           | unset                                                    | Truthy → skip subprocess execution, report `0` for both metrics. Pipeline smoke-test mode. |
+| `LMMS_TRITONBENCH_SANDBOX`           | `none`                                                   | `none` = bare subprocess (Colab default). `docker` = run each script in a one-shot container with `--network none`, read-only fs, memory/cpu caps. |
+| `LMMS_TRITONBENCH_DOCKER_IMAGE`      | `pytorch/pytorch:2.7.1-cuda12.8-cudnn9-runtime`          | Image used when `SANDBOX=docker`. Must have `python`, `torch`, `triton`. |
+| `LMMS_TRITONBENCH_DOCKER_MEM`        | `8g`                                                     | Container memory cap. |
+| `LMMS_TRITONBENCH_DOCKER_CPUS`       | `2`                                                      | Container cpu cap. |
+| `LMMS_TRITONBENCH_DOCKER_GPUS`       | `all`                                                    | `--gpus` value, or `none` to disable. |
+| `LMMS_TRITONBENCH_DOCKER_EXTRA_ARGS` | unset                                                    | Extra `docker run` args (whitespace-split). |
 
 ## Execution requirements
 
-`process_results` runs model-generated Python in a subprocess. The script
-imports `triton` and `torch` and allocates CUDA tensors; the host must therefore
-have a CUDA-capable GPU plus those packages installed at evaluation time.
+`process_results` runs model-generated Python. The script imports `triton` +
+`torch` and allocates CUDA tensors, so the runtime needs a CUDA GPU and those
+packages installed.
 
-**Do not run this task on a machine you don't fully control** — model output
-is executed as Python code. The intended runtime is a managed Colab notebook.
+**Do not run this task on a machine you don't fully control** without
+`SANDBOX=docker` — model output is executed as Python code.
+
+* On **Colab** (the project's intended runtime): leave `SANDBOX=none`. Colab is
+  itself an ephemeral VM, so the bare-subprocess mode is acceptable.
+* On a **workstation or shared host**: set `LMMS_TRITONBENCH_SANDBOX=docker`.
+  Each generated script runs in a one-shot container with no network, read-only
+  rootfs (writable `/tmp` tmpfs for triton's autotune cache), memory/cpu caps,
+  and the configured GPU set forwarded.

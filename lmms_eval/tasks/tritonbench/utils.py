@@ -46,13 +46,12 @@ _data = _data_mod
 
 # ---- process_docs ------------------------------------------------------------
 
-
-def _normalize(example: dict, track: str) -> dict:
-    """Project an upstream meta record into the canonical schema we use."""
+def _g_normalize(example: dict) -> dict:
+    """Project a TritonBench-G meta record into the canonical schema."""
     file_name = example.get("file") or ""
     return {
         "id": file_name.removesuffix(".py") if file_name else "",
-        "track": track,
+        "track": "G",
         "file_name": file_name,
         "instruction_simp": example.get("simp_instru", "") or "",
         "instruction_comp": example.get("comp_instru", "") or "",
@@ -64,11 +63,43 @@ def _normalize(example: dict, track: str) -> dict:
 
 
 def process_docs_g(dataset: datasets.Dataset) -> datasets.Dataset:
-    return dataset.map(lambda ex: _normalize(ex, "G"), remove_columns=dataset.column_names)
+    return dataset.map(_g_normalize, remove_columns=dataset.column_names)
 
 
 def process_docs_t(dataset: datasets.Dataset) -> datasets.Dataset:
-    return dataset.map(lambda ex: _normalize(ex, "T"), remove_columns=dataset.column_names)
+    """T track: meta jsonl has no simp/comp instruction fields and the alpaca
+    `output` is empty (gold lives in the per-problem .py file). Pull the
+    instruction text from the alpaca files (aligned by index) and the gold
+    output from the cached gold reference source."""
+    simp = _data.alpac_instructions("T", "simp")
+    comp = _data.alpac_instructions("T", "comp")
+    if len(simp) != len(dataset) or len(comp) != len(dataset):
+        eval_logger.warning(
+            f"tritonbench T: alpaca/meta length mismatch "
+            f"(simp={len(simp)}, comp={len(comp)}, meta={len(dataset)})"
+        )
+
+    def _normalize(example, idx):
+        file_name = example.get("file") or ""
+        try:
+            gold = _data.gold_test_src("T", file_name) if file_name else ""
+        except Exception:
+            gold = ""
+        return {
+            "id": file_name.removesuffix(".py") if file_name else "",
+            "track": "T",
+            "file_name": file_name,
+            "instruction_simp": simp[idx] if idx < len(simp) else "",
+            "instruction_comp": comp[idx] if idx < len(comp) else "",
+            "gold_output": gold,
+            "difficulty": str(example.get("difficulty", "")),
+            "repo": "",
+            "star": 0,
+        }
+
+    return dataset.map(
+        _normalize, with_indices=True, remove_columns=dataset.column_names
+    )
 
 
 # ---- doc_to_text -------------------------------------------------------------
