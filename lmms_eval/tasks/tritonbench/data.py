@@ -16,6 +16,7 @@ Cache layout (override with env var `LMMS_TRITONBENCH_CACHE`):
 from __future__ import annotations
 
 import io
+import json
 import os
 import sys
 import tarfile
@@ -91,6 +92,31 @@ def ensure_refs_cached() -> None:
             if not d.exists() or not any(d.glob("*.py")):
                 _populate_refs_from_tarball()
                 return
+
+
+_ALPAC_URLS = {
+    ("T", "simp"): f"{UPSTREAM_RAW}/data/TritonBench_T_simp_alpac_v1.json",
+    ("T", "comp"): f"{UPSTREAM_RAW}/data/TritonBench_T_comp_alpac_v1.json",
+    ("G", "simp"): f"{UPSTREAM_RAW}/data/TritonBench_G_simp_alpac_v1.json",
+    ("G", "comp"): f"{UPSTREAM_RAW}/data/TritonBench_G_comp_alpac_v1.json",
+}
+
+
+def alpac_instructions(track: str, variant: str) -> list[str]:
+    """Return the alpaca-format `instruction` strings for one (track, variant),
+    in the upstream order. Cached on disk and in process memory."""
+    key = (track, variant)
+    if key not in _ALPAC_URLS:
+        raise KeyError(f"unknown alpac (track, variant): {key}")
+    cache_path = cache_root() / "alpac" / f"{track}_{variant}.json"
+    if not cache_path.exists():
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        url = _ALPAC_URLS[key]
+        print(f"[tritonbench] fetching {url}", file=sys.stderr)
+        with urllib.request.urlopen(url) as r:
+            cache_path.write_bytes(r.read())
+    raw = json.loads(cache_path.read_text(encoding="utf-8"))
+    return [r.get("instruction", "") or "" for r in raw]
 
 
 def gold_test_src(track: str, file_name: str) -> str:
