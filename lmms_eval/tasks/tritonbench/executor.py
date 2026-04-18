@@ -7,6 +7,7 @@ Mirrors the upstream eval logic from
     https://github.com/thunlp/TritonBench/blob/main/EVAL/eval_G/0_call_acc.py
     https://github.com/thunlp/TritonBench/blob/main/EVAL/eval_G/1_exe_acc.py
 """
+
 from __future__ import annotations
 
 import ast
@@ -54,8 +55,7 @@ def normalize_code(code: str) -> str:
         return code
     keep = []
     for node in tree.body:
-        if isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef,
-                             ast.AsyncFunctionDef, ast.ClassDef, ast.Assign)):
+        if isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Assign)):
             keep.append(node)
     if not keep:
         return code
@@ -82,13 +82,7 @@ def split_gold_reference(gold_src: str) -> tuple[str, str]:
 
 def build_eval_script(model_code: str, test_harness: str) -> str:
     """Compose the script that will be executed for call/exec accuracy."""
-    return (
-        "# === model-generated code ===\n"
-        + normalize_code(model_code).rstrip()
-        + "\n\n# === gold test harness ===\n"
-        + test_harness.rstrip()
-        + "\n"
-    )
+    return "# === model-generated code ===\n" + normalize_code(model_code).rstrip() + "\n\n# === gold test harness ===\n" + test_harness.rstrip() + "\n"
 
 
 @dataclass
@@ -99,9 +93,7 @@ class RunResult:
     timed_out: bool
 
 
-def run_script(script: str, *, timeout: float = 120.0,
-               python_bin: str | None = None,
-               cuda_visible_devices: str | None = None) -> RunResult:
+def run_script(script: str, *, timeout: float = 120.0, python_bin: str | None = None, cuda_visible_devices: str | None = None) -> RunResult:
     """Run `script` as a Python subprocess and capture stdout/stderr.
 
     The harness is dropped into a temp file. CUDA_VISIBLE_DEVICES and the
@@ -112,9 +104,7 @@ def run_script(script: str, *, timeout: float = 120.0,
     if cuda_visible_devices is not None:
         env["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".py", delete=False, encoding="utf-8"
-    ) as fh:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding="utf-8") as fh:
         fh.write(script)
         path = fh.name
     try:
@@ -136,11 +126,7 @@ def run_script(script: str, *, timeout: float = 120.0,
             pass
 
 
-def score_one(model_raw: str, gold_test_src: str, *,
-              gold_stdout: str | None = None,
-              timeout: float = 120.0,
-              python_bin: str | None = None,
-              cuda_visible_devices: str | None = None) -> dict:
+def score_one(model_raw: str, gold_test_src: str, *, gold_stdout: str | None = None, timeout: float = 120.0, python_bin: str | None = None, cuda_visible_devices: str | None = None) -> dict:
     """Compute call_acc and exec_acc for a single (prediction, gold) pair.
 
     If `gold_stdout` is supplied, the gold script is not re-run. Otherwise

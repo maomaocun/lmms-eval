@@ -9,6 +9,7 @@ The dataset itself (instruction + gold output + meta) is loaded by HF datasets
 directly from the upstream raw URLs declared in the YAML configs. `process_docs`
 normalizes that to the columns we use throughout this module.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -18,23 +19,20 @@ import sys
 import datasets
 from loguru import logger as eval_logger
 
-
 # lmms-eval loads `utils.py` via importlib.util.spec_from_file_location, which
 # means we're not part of a proper package and `from . import executor` would
 # fail. When imported normally (e.g. from a Colab notebook via
 # `lmms_eval.tasks.tritonbench.utils`), we *are* in a package and the relative
 # import works. Try the package import first, then fall back to file loading.
 try:
-    from . import executor as _executor_mod  # type: ignore[no-redef]
     from . import data as _data_mod  # type: ignore[no-redef]
+    from . import executor as _executor_mod  # type: ignore[no-redef]
 except ImportError:
     _HERE = os.path.dirname(os.path.abspath(__file__))
 
     def _load_sibling(name: str):
         unique = f"_tritonbench_{name}"
-        spec = importlib.util.spec_from_file_location(
-            unique, os.path.join(_HERE, f"{name}.py")
-        )
+        spec = importlib.util.spec_from_file_location(unique, os.path.join(_HERE, f"{name}.py"))
         mod = importlib.util.module_from_spec(spec)
         sys.modules[unique] = mod
         spec.loader.exec_module(mod)
@@ -47,6 +45,7 @@ executor = _executor_mod
 _data = _data_mod
 
 # ---- process_docs ------------------------------------------------------------
+
 
 def _normalize(example: dict, track: str) -> dict:
     """Project an upstream meta record into the canonical schema we use."""
@@ -74,6 +73,7 @@ def process_docs_t(dataset: datasets.Dataset) -> datasets.Dataset:
 
 # ---- doc_to_text -------------------------------------------------------------
 
+
 def _doc_to_text(doc: dict, lmms_eval_specific_kwargs, key: str) -> str:
     pre = (lmms_eval_specific_kwargs or {}).get("pre_prompt", "")
     post = (lmms_eval_specific_kwargs or {}).get("post_prompt", "")
@@ -93,6 +93,7 @@ def doc_to_target(doc):
 
 
 # ---- process_results ---------------------------------------------------------
+
 
 def _dry_run() -> bool:
     return os.environ.get("LMMS_TRITONBENCH_DRY_RUN", "").lower() in ("1", "true", "yes")
@@ -138,6 +139,7 @@ def process_results(doc, results):
 
 
 # ---- aggregations ------------------------------------------------------------
+
 
 def _mean(items):
     if not items:
