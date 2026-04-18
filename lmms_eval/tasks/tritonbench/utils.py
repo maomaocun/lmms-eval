@@ -46,6 +46,7 @@ _data = _data_mod
 
 # ---- process_docs ------------------------------------------------------------
 
+
 def _g_normalize(example: dict) -> dict:
     """Project a TritonBench-G meta record into the canonical schema."""
     file_name = example.get("file") or ""
@@ -74,10 +75,7 @@ def process_docs_t(dataset: datasets.Dataset) -> datasets.Dataset:
     simp = _data.alpac_instructions("T", "simp")
     comp = _data.alpac_instructions("T", "comp")
     if len(simp) != len(dataset) or len(comp) != len(dataset):
-        eval_logger.warning(
-            f"tritonbench T: alpaca/meta length mismatch "
-            f"(simp={len(simp)}, comp={len(comp)}, meta={len(dataset)})"
-        )
+        eval_logger.warning(f"tritonbench T: alpaca/meta length mismatch " f"(simp={len(simp)}, comp={len(comp)}, meta={len(dataset)})")
 
     def _normalize(example, idx):
         file_name = example.get("file") or ""
@@ -97,9 +95,7 @@ def process_docs_t(dataset: datasets.Dataset) -> datasets.Dataset:
             "star": 0,
         }
 
-    return dataset.map(
-        _normalize, with_indices=True, remove_columns=dataset.column_names
-    )
+    return dataset.map(_normalize, with_indices=True, remove_columns=dataset.column_names)
 
 
 # ---- doc_to_text -------------------------------------------------------------

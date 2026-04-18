@@ -122,7 +122,11 @@ def _run_bare(python_bin: str, script_path: str, env: dict, timeout: float) -> R
     try:
         proc = subprocess.run(
             [python_bin, script_path],
-            capture_output=True, text=True, timeout=timeout, env=env, check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+            check=False,
         )
         return RunResult(proc.returncode, proc.stdout, proc.stderr, False)
     except subprocess.TimeoutExpired as e:
@@ -142,16 +146,26 @@ def _run_docker(script_path: str, timeout: float, cuda_visible_devices: str | No
     gpus = os.environ.get("LMMS_TRITONBENCH_DOCKER_GPUS", "all")
 
     cmd = [
-        "docker", "run", "--rm",
-        "--network", "none",
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "none",
         "--read-only",
-        "--tmpfs", "/tmp:rw,size=1g,exec",
-        "--memory", mem,
-        "--cpus", cpus,
-        "-e", "HOME=/tmp",
-        "-e", "TRITON_CACHE_DIR=/tmp/.triton",
-        "-v", f"{script_path}:/work/eval.py:ro",
-        "-w", "/work",
+        "--tmpfs",
+        "/tmp:rw,size=1g,exec",
+        "--memory",
+        mem,
+        "--cpus",
+        cpus,
+        "-e",
+        "HOME=/tmp",
+        "-e",
+        "TRITON_CACHE_DIR=/tmp/.triton",
+        "-v",
+        f"{script_path}:/work/eval.py:ro",
+        "-w",
+        "/work",
     ]
     if gpus and gpus.lower() != "none":
         cmd += ["--gpus", gpus]
@@ -162,7 +176,11 @@ def _run_docker(script_path: str, timeout: float, cuda_visible_devices: str | No
 
     try:
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout, check=False,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
         )
         return RunResult(proc.returncode, proc.stdout, proc.stderr, False)
     except subprocess.TimeoutExpired as e:
@@ -184,8 +202,7 @@ def run_script(script: str, *, timeout: float = 120.0, python_bin: str | None = 
         path = fh.name
     try:
         if mode == "docker":
-            return _run_docker(path, timeout=timeout,
-                               cuda_visible_devices=cuda_visible_devices)
+            return _run_docker(path, timeout=timeout, cuda_visible_devices=cuda_visible_devices)
         # Default: bare subprocess (Colab-compatible).
         env = os.environ.copy()
         if cuda_visible_devices is not None:
