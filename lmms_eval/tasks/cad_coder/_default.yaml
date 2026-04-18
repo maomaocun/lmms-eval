@@ -1,0 +1,36 @@
+dataset_path: CADCoder/GenCAD-Code
+output_type: generate_until
+
+doc_to_visual: !function utils.doc_to_visual
+doc_to_text: !function utils.doc_to_text
+doc_to_target: !function utils.doc_to_target
+
+generation_kwargs:
+  max_new_tokens: 4096
+  temperature: 0
+  top_p: 1.0
+  num_beams: 1
+  do_sample: false
+
+process_results: !function utils.process_results
+
+metric_list:
+  - metric: valid_syntax
+    aggregation: !function utils.aggregate_mean
+    higher_is_better: true
+  - metric: valid_step
+    aggregation: !function utils.aggregate_mean
+    higher_is_better: true
+  - metric: iou
+    aggregation: !function utils.aggregate_iou_mean
+    higher_is_better: true
+
+lmms_eval_specific_kwargs:
+  default:
+    pre_prompt: ""
+    post_prompt: ""
+
+metadata:
+  - version: 0.1
+  - paper_url: "https://decode.mit.edu/assets/papers/IDETC_CadCode_decodeweb.pdf"
+  - upstream_repo: "https://github.com/anniedoris/CAD-Coder"

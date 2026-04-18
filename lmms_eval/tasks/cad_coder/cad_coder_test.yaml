@@ -1,0 +1,4 @@
+include: _default.yaml
+task: cad_coder_test
+test_split: test
+process_docs: !function utils.process_docs_full
