@@ -17,6 +17,7 @@ If the upstream package is missing, the runner script writes a structured error
 to its JSON output, which `score_one` surfaces as a 0 across all metrics with
 an `error` field.
 """
+
 from __future__ import annotations
 
 import json
@@ -44,6 +45,7 @@ def extract_code(raw: str) -> str:
 
 
 # ---- sandbox / subprocess --------------------------------------------------
+
 
 def _sandbox_mode() -> str:
     return (os.environ.get("LMMS_KERNELBENCH_SANDBOX") or "none").lower()
@@ -73,7 +75,11 @@ def _run_bare(python_bin: str, script_path: str, env: dict, timeout: float) -> R
     try:
         proc = subprocess.run(
             [python_bin, script_path],
-            capture_output=True, text=True, timeout=timeout, env=env, check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+            check=False,
         )
         return RunResult(proc.returncode, proc.stdout, proc.stderr, False)
     except subprocess.TimeoutExpired as e:
@@ -88,17 +94,28 @@ def _run_docker(script_path: str, timeout: float, cuda_visible_devices: str | No
     gpus = os.environ.get("LMMS_KERNELBENCH_DOCKER_GPUS", "all")
 
     cmd = [
-        "docker", "run", "--rm",
-        "--network", "none",
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "none",
         "--read-only",
-        "--tmpfs", "/tmp:rw,size=2g,exec",
-        "--memory", mem,
-        "--cpus", cpus,
-        "-e", "HOME=/tmp",
-        "-e", "TRITON_CACHE_DIR=/tmp/.triton",
-        "-e", "TORCH_INDUCTOR_CACHE_DIR=/tmp/.inductor",
-        "-v", f"{script_path}:/work/eval.py:ro",
-        "-w", "/work",
+        "--tmpfs",
+        "/tmp:rw,size=2g,exec",
+        "--memory",
+        mem,
+        "--cpus",
+        cpus,
+        "-e",
+        "HOME=/tmp",
+        "-e",
+        "TRITON_CACHE_DIR=/tmp/.triton",
+        "-e",
+        "TORCH_INDUCTOR_CACHE_DIR=/tmp/.inductor",
+        "-v",
+        f"{script_path}:/work/eval.py:ro",
+        "-w",
+        "/work",
     ]
     if gpus and gpus.lower() != "none":
         cmd += ["--gpus", gpus]
@@ -109,7 +126,11 @@ def _run_docker(script_path: str, timeout: float, cuda_visible_devices: str | No
 
     try:
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout, check=False,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
         )
         return RunResult(proc.returncode, proc.stdout, proc.stderr, False)
     except subprocess.TimeoutExpired as e:
@@ -118,20 +139,16 @@ def _run_docker(script_path: str, timeout: float, cuda_visible_devices: str | No
         return RunResult(127, "", f"docker not available: {e}", False)
 
 
-def _run_script(script: str, *, timeout: float, python_bin: str | None,
-                cuda_visible_devices: str | None) -> RunResult:
+def _run_script(script: str, *, timeout: float, python_bin: str | None, cuda_visible_devices: str | None) -> RunResult:
     python_bin = python_bin or sys.executable
     mode = _sandbox_mode()
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".py", delete=False, encoding="utf-8"
-    ) as fh:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding="utf-8") as fh:
         fh.write(script)
         path = fh.name
     try:
         if mode == "docker":
-            return _run_docker(path, timeout=timeout,
-                               cuda_visible_devices=cuda_visible_devices)
+            return _run_docker(path, timeout=timeout, cuda_visible_devices=cuda_visible_devices)
         env = os.environ.copy()
         if cuda_visible_devices is not None:
             env["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
@@ -148,7 +165,8 @@ def _run_script(script: str, *, timeout: float, python_bin: str | None,
 # This Python source is what gets dropped into the temp file and executed in
 # the sandbox / subprocess. It loads upstream's eval helper, runs it, and
 # prints a single JSON line on stdout that the parent process parses.
-_RUNNER_TEMPLATE = textwrap.dedent('''
+_RUNNER_TEMPLATE = textwrap.dedent(
+    """
     import json, os, sys, traceback
 
     OUT_TAG = {OUT_TAG!r}
@@ -201,14 +219,14 @@ _RUNNER_TEMPLATE = textwrap.dedent('''
         "metadata": dict(getattr(result, "metadata", {{}})),
     }}
     _emit(payload)
-''').lstrip()
+"""
+).lstrip()
 
 
 _OUT_TAG = "<<<KB_RESULT>>>"
 
 
-def _build_runner(ref_src: str, gen_src: str, *,
-                  num_correct: int, num_perf: int, backend: str) -> str:
+def _build_runner(ref_src: str, gen_src: str, *, num_correct: int, num_perf: int, backend: str) -> str:
     return _RUNNER_TEMPLATE.format(
         OUT_TAG=_OUT_TAG,
         ref_src=ref_src,
@@ -225,7 +243,7 @@ def _parse_runner_output(stdout: str) -> dict | None:
         line = line.strip()
         if line.startswith(_OUT_TAG):
             try:
-                return json.loads(line[len(_OUT_TAG):])
+                return json.loads(line[len(_OUT_TAG) :])
             except json.JSONDecodeError:
                 return None
     return None
@@ -233,12 +251,8 @@ def _parse_runner_output(stdout: str) -> dict | None:
 
 # ---- public entry ----------------------------------------------------------
 
-def score_one(reference_src: str, model_raw: str, *,
-              num_correct: int = 5, num_perf: int = 100,
-              backend: str = "cuda",
-              timeout: float = 300.0,
-              python_bin: str | None = None,
-              cuda_visible_devices: str | None = None) -> dict:
+
+def score_one(reference_src: str, model_raw: str, *, num_correct: int = 5, num_perf: int = 100, backend: str = "cuda", timeout: float = 300.0, python_bin: str | None = None, cuda_visible_devices: str | None = None) -> dict:
     """Score one (reference, model_response) pair.
 
     Returns a dict with float metric values for `compiled`, `correctness`,
@@ -246,30 +260,20 @@ def score_one(reference_src: str, model_raw: str, *,
     """
     gen_src = extract_code(model_raw)
     if not gen_src:
-        return {"compiled": 0.0, "correctness": 0.0, "fast_1": 0.0, "fast_2": 0.0,
-                "error": "empty generated code"}
+        return {"compiled": 0.0, "correctness": 0.0, "fast_1": 0.0, "fast_2": 0.0, "error": "empty generated code"}
 
-    script = _build_runner(reference_src, gen_src,
-                           num_correct=num_correct, num_perf=num_perf,
-                           backend=backend)
-    res = _run_script(script, timeout=timeout, python_bin=python_bin,
-                      cuda_visible_devices=cuda_visible_devices)
+    script = _build_runner(reference_src, gen_src, num_correct=num_correct, num_perf=num_perf, backend=backend)
+    res = _run_script(script, timeout=timeout, python_bin=python_bin, cuda_visible_devices=cuda_visible_devices)
 
     if res.timed_out:
-        return {"compiled": 0.0, "correctness": 0.0, "fast_1": 0.0, "fast_2": 0.0,
-                "error": "timeout", "stderr_tail": res.stderr[-400:]}
+        return {"compiled": 0.0, "correctness": 0.0, "fast_1": 0.0, "fast_2": 0.0, "error": "timeout", "stderr_tail": res.stderr[-400:]}
 
     payload = _parse_runner_output(res.stdout)
     if payload is None:
-        return {"compiled": 0.0, "correctness": 0.0, "fast_1": 0.0, "fast_2": 0.0,
-                "error": "no result", "returncode": res.returncode,
-                "stderr_tail": res.stderr[-400:]}
+        return {"compiled": 0.0, "correctness": 0.0, "fast_1": 0.0, "fast_2": 0.0, "error": "no result", "returncode": res.returncode, "stderr_tail": res.stderr[-400:]}
 
     if not payload.get("ok"):
-        return {"compiled": 0.0, "correctness": 0.0, "fast_1": 0.0, "fast_2": 0.0,
-                "error": payload.get("error", "unknown"),
-                "stage": payload.get("stage"),
-                "hint": payload.get("hint")}
+        return {"compiled": 0.0, "correctness": 0.0, "fast_1": 0.0, "fast_2": 0.0, "error": payload.get("error", "unknown"), "stage": payload.get("stage"), "hint": payload.get("hint")}
 
     compiled = 1.0 if payload.get("compiled") else 0.0
     correct = 1.0 if payload.get("correctness") else 0.0
