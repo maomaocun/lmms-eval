@@ -12,6 +12,7 @@ Cache layout (override with env var `LMMS_TRITONBENCH_CACHE`):
     <cache>/refs/G/<filename>.py
     <cache>/refs/T/<filename>.py
 """
+
 from __future__ import annotations
 
 import io
@@ -24,12 +25,8 @@ from pathlib import Path
 
 UPSTREAM_REPO = "thunlp/TritonBench"
 UPSTREAM_BRANCH = "main"
-UPSTREAM_TARBALL = (
-    f"https://github.com/{UPSTREAM_REPO}/archive/refs/heads/{UPSTREAM_BRANCH}.tar.gz"
-)
-UPSTREAM_RAW = (
-    f"https://raw.githubusercontent.com/{UPSTREAM_REPO}/{UPSTREAM_BRANCH}"
-)
+UPSTREAM_TARBALL = f"https://github.com/{UPSTREAM_REPO}/archive/refs/heads/{UPSTREAM_BRANCH}.tar.gz"
+UPSTREAM_RAW = f"https://raw.githubusercontent.com/{UPSTREAM_REPO}/{UPSTREAM_BRANCH}"
 
 _REFS_DIR_IN_TAR = {
     "G": "data/TritonBench_G_v1/",
@@ -83,8 +80,7 @@ def _populate_refs_from_tarball() -> None:
                 target = out_dir / Path(m.name).name
                 target.write_bytes(fh.read())
                 extracted += 1
-            print(f"[tritonbench] cached {extracted} refs for track {track} -> {out_dir}",
-                  file=sys.stderr)
+            print(f"[tritonbench] cached {extracted} refs for track {track} -> {out_dir}", file=sys.stderr)
 
 
 def ensure_refs_cached() -> None:
