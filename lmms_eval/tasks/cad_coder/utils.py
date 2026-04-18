@@ -5,6 +5,7 @@ The only truly multimodal port in this set: the model receives a 448x448 CAD
 rendering plus a fixed text prompt and returns CadQuery Python source.
 Scoring delegates to executor.py (subprocess running cadquery).
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -36,6 +37,7 @@ executor = _executor_mod
 
 # ---- cache ----------------------------------------------------------------
 
+
 def _cache_root() -> Path:
     override = os.environ.get("LMMS_CADCODER_CACHE")
     if override:
@@ -49,6 +51,7 @@ def _gold_step_path(deepcad_id: str) -> str:
 
 
 # ---- process_docs ----------------------------------------------------------
+
 
 def _is_truthy(v) -> bool:
     if isinstance(v, bool):
@@ -80,6 +83,7 @@ def process_docs_hundred_subset(dataset: datasets.Dataset) -> datasets.Dataset:
 
 # ---- doc_to_visual / text / target ----------------------------------------
 
+
 def doc_to_visual(doc):
     img = doc["image"]
     if hasattr(img, "convert"):
@@ -98,6 +102,7 @@ def doc_to_target(doc):
 
 
 # ---- env knobs ------------------------------------------------------------
+
 
 def _dry_run() -> bool:
     return os.environ.get("LMMS_CADCODER_DRY_RUN", "").lower() in ("1", "true", "yes")
@@ -155,14 +160,11 @@ def process_results(doc, results):
     if "error" in out:
         eval_logger.warning(f"cad_coder {rid}: {out['error']}")
 
-    return {
-        m: {"id": rid, "value": float(out.get(m, 0.0)),
-            **({"error": out["error"]} if "error" in out else {})}
-        for m in _METRICS
-    }
+    return {m: {"id": rid, "value": float(out.get(m, 0.0)), **({"error": out["error"]} if "error" in out else {})} for m in _METRICS}
 
 
 # ---- aggregations ---------------------------------------------------------
+
 
 def aggregate_mean(results):
     if not results:

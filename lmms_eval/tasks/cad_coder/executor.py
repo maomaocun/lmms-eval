@@ -19,6 +19,7 @@ run only pays gold-CAD generation cost once.
 The runtime needs `cadquery` installed (heavy: brings in OpenCASCADE).
 The Colab notebook is the intended runtime; pip install in the setup cell.
 """
+
 from __future__ import annotations
 
 import json
@@ -45,6 +46,7 @@ def extract_code(raw: str) -> str:
 
 
 # ---- sandbox / subprocess --------------------------------------------------
+
 
 def _sandbox_mode() -> str:
     return (os.environ.get("LMMS_CADCODER_SANDBOX") or "none").lower()
@@ -74,38 +76,56 @@ def _run_bare(python_bin: str, script_path: str, env: dict, timeout: float) -> R
     try:
         proc = subprocess.run(
             [python_bin, script_path],
-            capture_output=True, text=True, timeout=timeout, env=env, check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+            check=False,
         )
         return RunResult(proc.returncode, proc.stdout, proc.stderr, False)
     except subprocess.TimeoutExpired as e:
         return RunResult(-1, e.stdout or "", e.stderr or "", True)
 
 
-def _run_docker(script_path: str, payload_path: str, gold_dir: str,
-                timeout: float) -> RunResult:
+def _run_docker(script_path: str, payload_path: str, gold_dir: str, timeout: float) -> RunResult:
     image = _docker_image()
     mem = os.environ.get("LMMS_CADCODER_DOCKER_MEM", "4g")
     cpus = os.environ.get("LMMS_CADCODER_DOCKER_CPUS", "2")
 
     cmd = [
-        "docker", "run", "--rm",
-        "--network", "none",
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "none",
         "--read-only",
-        "--tmpfs", "/tmp:rw,size=512m,exec",
-        "--memory", mem,
-        "--cpus", cpus,
-        "-e", "HOME=/tmp",
-        "-v", f"{script_path}:/work/run.py:ro",
-        "-v", f"{payload_path}:/work/payload.json:ro",
-        "-v", f"{gold_dir}:/work/gold:rw",
-        "-w", "/work",
+        "--tmpfs",
+        "/tmp:rw,size=512m,exec",
+        "--memory",
+        mem,
+        "--cpus",
+        cpus,
+        "-e",
+        "HOME=/tmp",
+        "-v",
+        f"{script_path}:/work/run.py:ro",
+        "-v",
+        f"{payload_path}:/work/payload.json:ro",
+        "-v",
+        f"{gold_dir}:/work/gold:rw",
+        "-w",
+        "/work",
     ]
     cmd += _docker_extra_args()
     cmd += [image, "python3", "/work/run.py", "/work/payload.json"]
 
     try:
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout, check=False,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
         )
         return RunResult(proc.returncode, proc.stdout, proc.stderr, False)
     except subprocess.TimeoutExpired as e:
@@ -114,19 +134,14 @@ def _run_docker(script_path: str, payload_path: str, gold_dir: str,
         return RunResult(127, "", f"docker not available: {e}", False)
 
 
-def _run(script: str, payload: dict, gold_dir: str, *,
-         timeout: float, python_bin: str | None) -> RunResult:
+def _run(script: str, payload: dict, gold_dir: str, *, timeout: float, python_bin: str | None) -> RunResult:
     python_bin = python_bin or sys.executable
     mode = _sandbox_mode()
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".py", delete=False, encoding="utf-8"
-    ) as fh:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding="utf-8") as fh:
         fh.write(script)
         script_path = fh.name
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".json", delete=False, encoding="utf-8"
-    ) as fh:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as fh:
         json.dump(payload, fh)
         payload_path = fh.name
 
@@ -151,7 +166,8 @@ def _run(script: str, payload: dict, gold_dir: str, *,
 # logic. Emits one tagged JSON line on stdout.
 _OUT_TAG = "<<<CC_RESULT>>>"
 
-_RUNNER_SOURCE = textwrap.dedent('''
+_RUNNER_SOURCE = textwrap.dedent(
+    """
     import json, os, sys, subprocess, tempfile, traceback
 
     OUT_TAG = "<<<CC_RESULT>>>"
@@ -316,7 +332,8 @@ _RUNNER_SOURCE = textwrap.dedent('''
         _emit({"ok": False, "stage": "runner",
                "error": f"{type(e).__name__}: {e}",
                "trace": traceback.format_exc()[-800:]})
-''').lstrip()
+"""
+).lstrip()
 
 
 def _parse_runner_output(stdout: str) -> dict | None:
@@ -324,7 +341,7 @@ def _parse_runner_output(stdout: str) -> dict | None:
         line = line.strip()
         if line.startswith(_OUT_TAG):
             try:
-                return json.loads(line[len(_OUT_TAG):])
+                return json.loads(line[len(_OUT_TAG) :])
             except json.JSONDecodeError:
                 return None
     return None
@@ -332,11 +349,8 @@ def _parse_runner_output(stdout: str) -> dict | None:
 
 # ---- public entry ----------------------------------------------------------
 
-def score_one(model_raw: str, gold_code: str, gold_step_path: str, *,
-              exec_timeout: float = 60.0,
-              total_timeout: float = 300.0,
-              skip_iou: bool = False,
-              python_bin: str | None = None) -> dict:
+
+def score_one(model_raw: str, gold_code: str, gold_step_path: str, *, exec_timeout: float = 60.0, total_timeout: float = 300.0, skip_iou: bool = False, python_bin: str | None = None) -> dict:
     code = extract_code(model_raw)
     payload = {
         "model_code": code,
@@ -348,23 +362,17 @@ def score_one(model_raw: str, gold_code: str, gold_step_path: str, *,
     gold_dir = os.path.dirname(gold_step_path) or "."
     os.makedirs(gold_dir, exist_ok=True)
 
-    res = _run(_RUNNER_SOURCE, payload, gold_dir,
-               timeout=total_timeout, python_bin=python_bin)
+    res = _run(_RUNNER_SOURCE, payload, gold_dir, timeout=total_timeout, python_bin=python_bin)
 
     if res.timed_out:
-        return {"valid_syntax": 0.0, "valid_step": 0.0, "iou": 0.0,
-                "error": "timeout", "stderr_tail": res.stderr[-400:]}
+        return {"valid_syntax": 0.0, "valid_step": 0.0, "iou": 0.0, "error": "timeout", "stderr_tail": res.stderr[-400:]}
 
     out = _parse_runner_output(res.stdout)
     if out is None:
-        return {"valid_syntax": 0.0, "valid_step": 0.0, "iou": 0.0,
-                "error": "no result", "returncode": res.returncode,
-                "stderr_tail": res.stderr[-400:]}
+        return {"valid_syntax": 0.0, "valid_step": 0.0, "iou": 0.0, "error": "no result", "returncode": res.returncode, "stderr_tail": res.stderr[-400:]}
 
     if not out.get("ok"):
-        return {"valid_syntax": 0.0, "valid_step": 0.0, "iou": 0.0,
-                "error": out.get("error", "unknown"),
-                "stage": out.get("stage")}
+        return {"valid_syntax": 0.0, "valid_step": 0.0, "iou": 0.0, "error": out.get("error", "unknown"), "stage": out.get("stage")}
 
     return {
         "valid_syntax": float(out.get("valid_syntax", 0.0)),
