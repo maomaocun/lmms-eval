@@ -3,6 +3,7 @@ lmms-eval glue for the SuperCoder task.
 
 Heavy lifting (subprocess, gcc, hyperfine) lives in `executor.py`.
 """
+
 from __future__ import annotations
 
 import ast
@@ -34,6 +35,7 @@ executor = _executor_mod
 
 
 # ---- process_docs ----------------------------------------------------------
+
 
 def _coerce_str_list(v) -> list[str]:
     """The HF dataset stringifies inputs/outputs as a Python list literal."""
@@ -77,6 +79,7 @@ def process_docs(dataset: datasets.Dataset) -> datasets.Dataset:
 
 # ---- doc_to_text / target --------------------------------------------------
 
+
 def doc_to_text(doc, lmms_eval_specific_kwargs=None):
     pre = (lmms_eval_specific_kwargs or {}).get("pre_prompt", "")
     post = (lmms_eval_specific_kwargs or {}).get("post_prompt", "")
@@ -90,6 +93,7 @@ def doc_to_target(doc):
 
 
 # ---- env knobs -------------------------------------------------------------
+
 
 def _dry_run() -> bool:
     return os.environ.get("LMMS_SUPERCODER_DRY_RUN", "").lower() in ("1", "true", "yes")
@@ -150,15 +154,13 @@ def process_results(doc, results):
         eval_logger.warning(f"supercoder {rid}: {out['error']}")
 
     return {
-        m: {"id": rid, "value": float(out.get(m, 0.0 if m != "speedup" else 1.0)),
-            **({"error": out["error"]} if "error" in out else {}),
-            **({"n_cases": out["n_cases"], "n_passed": out["n_passed"]}
-               if "n_cases" in out else {})}
+        m: {"id": rid, "value": float(out.get(m, 0.0 if m != "speedup" else 1.0)), **({"error": out["error"]} if "error" in out else {}), **({"n_cases": out["n_cases"], "n_passed": out["n_passed"]} if "n_cases" in out else {})}
         for m in _METRICS
     }
 
 
 # ---- aggregations ----------------------------------------------------------
+
 
 def _mean(items):
     if not items:
