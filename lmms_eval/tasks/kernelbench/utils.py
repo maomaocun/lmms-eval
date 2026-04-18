@@ -4,6 +4,7 @@ lmms-eval glue for the KernelBench tasks.
 Heavy lifting (subprocess, sandbox, upstream eval invocation) lives in
 `executor.py`. This module is the thin lmms-eval-side shim.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -51,6 +52,7 @@ _PROMPT_TEMPLATE = (
 
 # ---- process_docs ----------------------------------------------------------
 
+
 def _normalize(example: dict) -> dict:
     return {
         "id": f"level{example['level']}/{example['name']}",
@@ -67,6 +69,7 @@ def process_docs(dataset: datasets.Dataset) -> datasets.Dataset:
 
 # ---- doc_to_text / target --------------------------------------------------
 
+
 def doc_to_text(doc, lmms_eval_specific_kwargs=None):
     pre = (lmms_eval_specific_kwargs or {}).get("pre_prompt", "")
     post = (lmms_eval_specific_kwargs or {}).get("post_prompt", "")
@@ -82,6 +85,7 @@ def doc_to_target(doc):
 
 
 # ---- env knobs -------------------------------------------------------------
+
 
 def _dry_run() -> bool:
     return os.environ.get("LMMS_KERNELBENCH_DRY_RUN", "").lower() in ("1", "true", "yes")
@@ -146,15 +150,11 @@ def process_results(doc, results):
     if "error" in out:
         eval_logger.warning(f"kernelbench {rid}: {out['error']}")
 
-    return {
-        m: {"id": rid, "level": level, "value": out.get(m, 0.0),
-            **({"error": out["error"]} if "error" in out else {}),
-            **({"speedup": out["speedup"]} if "speedup" in out else {})}
-        for m in _METRICS
-    }
+    return {m: {"id": rid, "level": level, "value": out.get(m, 0.0), **({"error": out["error"]} if "error" in out else {}), **({"speedup": out["speedup"]} if "speedup" in out else {})} for m in _METRICS}
 
 
 # ---- aggregations ----------------------------------------------------------
+
 
 def _mean(items):
     if not items:
