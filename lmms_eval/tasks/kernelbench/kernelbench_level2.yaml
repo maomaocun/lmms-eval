@@ -1,0 +1,4 @@
+include: _default.yaml
+task: kernelbench_level2
+test_split: level_2
+process_docs: !function utils.process_docs
