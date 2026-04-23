@@ -1,0 +1,7 @@
+include: _default.yaml
+task: tritonbench_g
+dataset_kwargs:
+  data_files:
+    train: https://raw.githubusercontent.com/thunlp/TritonBench/main/data/TritonBench_G_v1.json
+process_docs: !function utils.process_docs_g
+doc_to_text: !function utils.doc_to_text_simp
