@@ -1,0 +1,39 @@
+dataset_path: ScalingIntelligence/KernelBench
+dataset_name: default
+output_type: generate_until
+
+doc_to_text: !function utils.doc_to_text
+doc_to_target: !function utils.doc_to_target
+
+generation_kwargs:
+  max_new_tokens: 4096
+  temperature: 0
+  top_p: 1.0
+  num_beams: 1
+  do_sample: false
+
+process_results: !function utils.process_results
+
+metric_list:
+  - metric: compiled
+    aggregation: !function utils.aggregate_compiled
+    higher_is_better: true
+  - metric: correctness
+    aggregation: !function utils.aggregate_correctness
+    higher_is_better: true
+  - metric: fast_1
+    aggregation: !function utils.aggregate_fast_1
+    higher_is_better: true
+  - metric: fast_2
+    aggregation: !function utils.aggregate_fast_2
+    higher_is_better: true
+
+lmms_eval_specific_kwargs:
+  default:
+    pre_prompt: ""
+    post_prompt: ""
+
+metadata:
+  - version: 0.1
+  - paper_url: "https://scalingintelligence.stanford.edu/pubs/kernelbench.pdf"
+  - upstream_repo: "https://github.com/ScalingIntelligence/KernelBench"
