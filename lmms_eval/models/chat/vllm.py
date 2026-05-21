@@ -103,11 +103,55 @@ class VLLM(VLLMSimple):
             start_time = time.time()
 
             def _run_chat(inputs: list[dict]) -> list[str]:
-                response = self.client.chat(
-                    sampling_params=sampling_params,
-                    messages=inputs,
-                    chat_template=self.chat_template,
-                )
+                # Route text-only conversations through generate() with a pre-rendered
+                # chat-template string. Some tokenizers (e.g. Qwen3-VL) return a
+                # BatchEncoding instead of list[int] when apply_chat_template is
+                # invoked with tokenize=True, which crashes vLLM 0.15.x's chat path
+                # (`'>' not supported between instances of 'str' and 'int'`).
+                def _is_text_only(msgs):
+                    for m in msgs:
+                        c = m.get("content")
+                        if isinstance(c, list):
+                            for part in c:
+                                if isinstance(part, dict) and part.get("type") not in {"text", None}:
+                                    return False
+                    return True
+
+                all_text_only = all(_is_text_only(msgs) for msgs in inputs)
+                if all_text_only:
+                    tokenizer = self.client.get_tokenizer()
+                    chat_template = self.chat_template or getattr(tokenizer, "chat_template", None)
+                    rendered: list[str] = []
+                    for msgs in inputs:
+                        flat = []
+                        for m in msgs:
+                            c = m.get("content")
+                            if isinstance(c, list):
+                                text = "".join(
+                                    part.get("text", "") for part in c
+                                    if isinstance(part, dict) and part.get("type") == "text"
+                                )
+                            else:
+                                text = c or ""
+                            flat.append({"role": m["role"], "content": text})
+                        rendered.append(
+                            tokenizer.apply_chat_template(
+                                conversation=flat,
+                                chat_template=chat_template,
+                                tokenize=False,
+                                add_generation_prompt=True,
+                            )
+                        )
+                    response = self.client.generate(
+                        prompts=rendered,
+                        sampling_params=sampling_params,
+                    )
+                else:
+                    response = self.client.chat(
+                        sampling_params=sampling_params,
+                        messages=inputs,
+                        chat_template=self.chat_template,
+                    )
                 return [o.outputs[0].text for o in response]
 
             response_text = self._run_tp_synced(batched_messages, _run_chat)
