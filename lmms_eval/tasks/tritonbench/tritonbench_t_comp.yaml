@@ -1,0 +1,7 @@
+include: _default.yaml
+task: tritonbench_t_comp
+dataset_kwargs:
+  data_files:
+    train: https://raw.githubusercontent.com/thunlp/TritonBench/main/data/TritonBench_T_v1.jsonl
+process_docs: !function utils.process_docs_t
+doc_to_text: !function utils.doc_to_text_comp
