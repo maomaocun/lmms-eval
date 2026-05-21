@@ -1,0 +1,2 @@
+task: veriscopebench
+class: !function utils.VeriScopeBenchTask

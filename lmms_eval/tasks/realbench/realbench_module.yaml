@@ -1,0 +1,2 @@
+task: realbench_module
+class: !function utils.RealBenchModuleTask
