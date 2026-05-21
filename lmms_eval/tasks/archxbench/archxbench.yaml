@@ -1,0 +1,2 @@
+task: archxbench
+class: !function utils.ArchXBenchTask
