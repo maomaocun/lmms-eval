@@ -49,9 +49,11 @@ class AzureOpenAIProvider(OpenAIProvider):
         payload = {
             "model": config.model_name,
             "messages": messages,
-            "temperature": config.temperature,
-            "max_tokens": config.max_tokens,
         }
+        if config.temperature is not None:
+            payload["temperature"] = config.temperature
+        if config.max_tokens is not None:
+            payload["max_tokens"] = config.max_tokens
 
         if config.top_p is not None:
             payload["top_p"] = config.top_p

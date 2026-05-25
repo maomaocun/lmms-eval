@@ -11,8 +11,8 @@ class ServerConfig:
     """Configuration for judge models"""
 
     model_name: str
-    temperature: float = 0.0
-    max_tokens: int = 1024
+    temperature: Optional[float] = 0.0
+    max_tokens: Optional[int] = 1024
     top_p: Optional[float] = None
     timeout: int = 60
     num_retries: int = DEFAULT_NUM_RETRIES

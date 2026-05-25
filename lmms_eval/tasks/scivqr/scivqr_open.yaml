@@ -1,0 +1,24 @@
+dataset_path: l205/SciVQR
+task: scivqr_open
+dataset_kwargs:
+  token: True
+test_split: train
+process_docs: !function utils.scivqr_process_docs_open
+output_type: generate_until
+doc_to_visual: !function utils.scivqr_doc_to_visual
+doc_to_text: !function utils.scivqr_doc_to_text_open
+doc_to_target: "answer"
+process_results: !function utils.scivqr_open_process_results
+
+metric_list:
+  - metric: scivqr_open
+    aggregation: !function utils.scivqr_aggregate_open_results
+    higher_is_better: true
+
+generation_kwargs:
+  max_new_tokens: 4096
+  temperature: 0
+  do_sample: False
+
+metadata:
+  version: 0.0

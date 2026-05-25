@@ -7,6 +7,7 @@ without regeneration, completely separating the generation and judging phases.
 import asyncio
 import json
 import os
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -18,6 +19,7 @@ from tqdm import tqdm
 # Delay imports to avoid loading heavy dependencies
 ProviderFactory = None
 ServerConfig = None
+SCIVQR_SUBJECTS = {"math", "physics", "chemistry", "biology", "geography", "astronomy"}
 
 def _get_provider_factory():
     global ProviderFactory
@@ -86,6 +88,7 @@ class JudgeRunner:
         self._provider_lock = threading.Lock()
         self._current_task_name = None
         self._current_task = None
+        self._scivqr_doc_lookup_cache = {}
         logger.info(
             f"JudgeRunner initialized: mode={self.judge_mode}, model={self.judge_model}, "
             f"base_url={self.judge_base_url}, parallel={self.parallel}"
@@ -125,6 +128,7 @@ class JudgeRunner:
         # Load samples
         logger.debug(f"Loading samples from {input_path}")
         samples = self._load_jsonl(input_path)
+        samples = self._attach_scivqr_subject_from_path(samples, input_path)
         logger.info(f"Loaded {len(samples)} samples")
         
         # Judge each sample concurrently
@@ -167,6 +171,14 @@ class JudgeRunner:
         filtered_resps = sample.get("filtered_resps", [])
         target = sample.get("target", None)
         doc_id = sample.get("doc_id", "unknown")
+
+        if self._is_scivqr_task() and not filtered_resps and "response" in sample:
+            filtered_resps = [sample.get("response", "")]
+        if self._is_scivqr_task() and target is None:
+            if self._current_task_name == "scivqr_reasoning":
+                target = sample.get("gt_reason", sample.get("solution", sample.get("answer")))
+            else:
+                target = sample.get("answer")
         
         # Detect whether the original doc was dropped during serialization.
         # The evaluation tracker pops "doc" before saving JSONL, so if doc is
@@ -184,6 +196,7 @@ class JudgeRunner:
             else:
                 # Create a merged doc with sample context
                 doc = {"__sample_context__": sample}
+        doc = self._enrich_scivqr_reasoning_doc(doc, sample, task)
         
         # Convert to list if single response
         if isinstance(filtered_resps, str):
@@ -195,7 +208,9 @@ class JudgeRunner:
         try:
             # Step 1: rule-based judging (reuse pre-computed metrics if doc was dropped)
             if doc_was_dropped:
-                existing_metrics = self._extract_existing_metrics(sample)
+                process_globals = getattr(process_results_fn, "__globals__", {})
+                force_reprocess = process_globals.get("FORCE_REPROCESS_FROM_SAMPLE") is True
+                existing_metrics = {} if force_reprocess else self._extract_existing_metrics(sample)
                 if existing_metrics:
                     metrics = existing_metrics
                     result_sample["metrics"] = metrics
@@ -284,19 +299,79 @@ class JudgeRunner:
             doc = dict(doc)
             doc["answer"] = answer
         
-        # Load task-specific custom prompt if available
+        # Load task-specific custom judge hooks if available
+        task_module_globals = {}
         custom_prompt = None
+        custom_messages = None
+        parse_judge_response = None
+        update_metrics_from_judge = None
         if self._current_task is not None:
             try:
                 process_results_fn = getattr(self._current_task.config, "process_results", None)
                 if process_results_fn is not None:
                     task_module_globals = getattr(process_results_fn, "__globals__", {})
+                    parse_judge_response = task_module_globals.get("parse_judge_response")
+                    update_metrics_from_judge = task_module_globals.get("update_metrics_from_judge")
+                    get_judge_messages = task_module_globals.get("get_judge_messages")
+                    if get_judge_messages is not None:
+                        custom_messages = get_judge_messages(doc, prediction, target)
+                        logger.debug("Using custom judge messages from task module")
                     get_judge_prompt = task_module_globals.get("get_judge_prompt")
                     if get_judge_prompt is not None:
                         custom_prompt = get_judge_prompt(doc, prediction, target)
                         logger.debug("Using custom judge prompt from task module")
             except Exception as e:
                 logger.debug(f"Failed to load custom judge prompt: {e}")
+
+        if parse_judge_response is not None and (custom_messages is not None or custom_prompt is not None):
+            try:
+                from lmms_eval.llm_judge.protocol import Request
+
+                SC = _get_server_config()
+                base_config = self._judge_provider.config
+                config = SC(
+                    model_name=task_module_globals.get("JUDGE_MODEL", self.judge_model),
+                    temperature=task_module_globals.get("JUDGE_TEMPERATURE", base_config.temperature),
+                    max_tokens=task_module_globals.get("JUDGE_MAX_TOKENS", base_config.max_tokens),
+                    top_p=task_module_globals.get("JUDGE_TOP_P", base_config.top_p),
+                    timeout=task_module_globals.get("JUDGE_TIMEOUT", base_config.timeout),
+                    num_retries=task_module_globals.get("JUDGE_NUM_RETRIES", base_config.num_retries),
+                    retry_delay=task_module_globals.get("JUDGE_RETRY_DELAY", base_config.retry_delay),
+                    max_concurrent=task_module_globals.get("JUDGE_MAX_CONCURRENT", base_config.max_concurrent),
+                    response_format=task_module_globals.get("JUDGE_RESPONSE_FORMAT", base_config.response_format),
+                )
+                messages = custom_messages if custom_messages is not None else [{"role": "user", "content": custom_prompt}]
+                response = self._judge_provider.evaluate(
+                    Request(
+                        messages=messages,
+                        question=question,
+                        answer=answer,
+                        prediction=prediction,
+                        config=config,
+                    )
+                )
+                parsed = parse_judge_response(response.content)
+                if update_metrics_from_judge is not None:
+                    return update_metrics_from_judge(doc, results, fallback_metrics, parsed, response.content, response.model_used)
+
+                metrics = fallback_metrics.copy()
+                metrics["llm_judge_raw"] = response.content
+                metrics["llm_judge_model"] = response.model_used
+                metrics["llm_judge_success"] = parsed is not None
+                if isinstance(parsed, bool):
+                    metrics["llm_judge_score"] = int(parsed)
+                    metrics["correct"] = parsed
+                else:
+                    metrics["llm_judge_result"] = parsed
+                return metrics
+            except Exception as e:
+                logger.error(f"Custom LLM judge failed: {e}")
+                return {
+                    **fallback_metrics,
+                    "llm_judge_error": str(e),
+                    "llm_judge_failed": True,
+                    "llm_judge_success": False,
+                }
         
         # SFE-specific 0-10 scoring for mcq/exact_match questions
         is_sfe = self._current_task_name and "sfe" in self._current_task_name.lower()
@@ -499,7 +574,7 @@ Provide a single integer from 0 to 10 to reflect your judgment of the answer's c
             metrics["llm_judge_score"] = sample["api_judge_accuracy"]
             metrics["needs_llm_judge"] = True
         # Nested metric objects (e.g. wemath_loose / wemath_strict)
-        for key in ["wemath_loose", "wemath_strict"]:
+        for key in ["wemath_loose", "wemath_strict", "scivqr_acc", "scivqr_open", "scivqr_reasoning"]:
             if key in sample:
                 metrics[key] = sample[key]
         # SFE-specific fields needed for standalone judge and aggregation
@@ -537,6 +612,130 @@ Provide a single integer from 0 to 10 to reflect your judgment of the answer's c
                 if isinstance(val, float) and val < 0.1:
                     return True
         return False
+
+    def _is_scivqr_task(self) -> bool:
+        return bool(self._current_task_name and self._current_task_name.startswith("scivqr"))
+
+    def _attach_scivqr_subject_from_path(self, samples: List[Dict[str, Any]], input_path: Path) -> List[Dict[str, Any]]:
+        if not self._is_scivqr_task():
+            return samples
+        suffix = "_results"
+        stem = input_path.stem
+        if not stem.endswith(suffix):
+            return samples
+        subject = stem[: -len(suffix)]
+        if subject not in SCIVQR_SUBJECTS:
+            return samples
+        enriched_samples = []
+        for sample in samples:
+            if isinstance(sample, dict) and not sample.get("subject"):
+                sample = dict(sample)
+                sample["subject"] = subject
+                sample["__scivqr_subject_from_path"] = True
+            enriched_samples.append(sample)
+        return enriched_samples
+
+    def _enrich_scivqr_reasoning_doc(self, doc: Dict[str, Any], sample: Dict[str, Any], task: Any) -> Dict[str, Any]:
+        """Attach the official SciVQR reasoning reference solution when possible.
+
+        The official reasoning evaluator rebuilds ``gt_reason`` from the SciVQR
+        dataset, keyed by the predicted row's question text. Standalone judging
+        of official ``*_results.jsonl`` files should do the same when those rows
+        contain only ``prompt``/``response``/``answer``.
+        """
+        if self._current_task_name != "scivqr_reasoning":
+            return doc
+        if not isinstance(doc, dict) or "__sample_context__" not in doc:
+            return doc
+        context = doc.get("__sample_context__") or {}
+        if context.get("gt_reason") or context.get("solution"):
+            return doc
+
+        dataset_doc = self._lookup_scivqr_dataset_doc(task, context)
+        if not dataset_doc or not dataset_doc.get("solution"):
+            return doc
+
+        enriched = dict(dataset_doc)
+        enriched.setdefault("gt_reason", dataset_doc.get("solution", ""))
+        return enriched
+
+    def _lookup_scivqr_dataset_doc(self, task: Any, sample: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        by_pid, by_question, by_subject_question = self._get_scivqr_doc_lookup(task)
+
+        question = self._extract_scivqr_question_text(sample)
+        normalized = self._normalize_scivqr_question(question)
+        subject = sample.get("subject")
+        if subject and normalized:
+            subject_key = (str(subject), normalized)
+            if subject_key in by_subject_question:
+                return by_subject_question[subject_key]
+            if sample.get("__scivqr_subject_from_path"):
+                return None
+
+        for key in ["pid", "question_id", "doc_id"]:
+            value = sample.get(key)
+            if value is not None and str(value) in by_pid:
+                return by_pid[str(value)]
+
+        if normalized and normalized in by_question:
+            return by_question[normalized]
+        return None
+
+    def _get_scivqr_doc_lookup(self, task: Any):
+        cache_key = id(task)
+        if cache_key in self._scivqr_doc_lookup_cache:
+            return self._scivqr_doc_lookup_cache[cache_key]
+
+        docs = []
+        try:
+            if hasattr(task, "eval_docs_no_media"):
+                docs = list(task.eval_docs_no_media)
+            elif task.has_test_docs():
+                docs = list(task.test_docs())
+            else:
+                docs = list(task.validation_docs())
+        except Exception as e:
+            logger.debug(f"Could not preload SciVQR docs for reasoning lookup: {e}")
+
+        by_pid = {}
+        by_question = {}
+        by_subject_question = {}
+        for item in docs:
+            if not isinstance(item, dict):
+                continue
+            pid = item.get("pid")
+            if pid is not None:
+                by_pid[str(pid)] = item
+            question_key = self._normalize_scivqr_question(item.get("question", ""))
+            if question_key:
+                by_question[question_key] = item
+                subject = item.get("subject")
+                if subject:
+                    by_subject_question[(str(subject), question_key)] = item
+
+        self._scivqr_doc_lookup_cache[cache_key] = (by_pid, by_question, by_subject_question)
+        return by_pid, by_question, by_subject_question
+
+    @staticmethod
+    def _extract_scivqr_question_text(sample: Dict[str, Any]) -> str:
+        text = str(sample.get("question") or sample.get("prompt") or sample.get("input") or "")
+        match = re.search(r"\\boxed\{\}.*?\n(.*?)(?:\nChoices:|\Z)", text, re.DOTALL)
+        if match:
+            return match.group(1).strip()
+        text = re.split(r"\n[A-E]\.\s+", text, maxsplit=1)[0]
+        text = text.split("\nChoices:")[0]
+        for suffix in [
+            "\nAnswer with the option's letter from the given choices directly.",
+            "\nAnswer the question directly.",
+        ]:
+            text = text.replace(suffix, "")
+        return text.strip()
+
+    @staticmethod
+    def _normalize_scivqr_question(question: Any) -> str:
+        text = str(question or "")
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        return re.sub(r"\s+", " ", text).strip()
     
     def _load_task(self, task_name: str) -> Any:
         """Load task by name.
@@ -714,6 +913,12 @@ Provide a single integer from 0 to 10 to reflect your judgment of the answer's c
             output_path: Output file path
         """
         output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        save_hook = self._get_task_save_hook()
+        if save_hook is not None:
+            save_hook(results, output_path)
+            logger.debug(f"Saved {len(results)} task-formatted results to {output_path}")
+            return
         
         with open(output_path, "w", encoding="utf-8") as f:
             for sample in results:
@@ -722,6 +927,20 @@ Provide a single integer from 0 to 10 to reflect your judgment of the answer's c
                 f.write(json.dumps(cleaned, ensure_ascii=False, default=str) + "\n")
         
         logger.debug(f"Saved {len(results)} results to {output_path}")
+
+    def _get_task_save_hook(self) -> Optional[Callable]:
+        if self._current_task is None:
+            return None
+        try:
+            process_results_fn = getattr(self._current_task.config, "process_results", None)
+            if process_results_fn is None:
+                return None
+            task_module_globals = getattr(process_results_fn, "__globals__", {})
+            hook = task_module_globals.get("save_judged_results")
+            return hook if callable(hook) else None
+        except Exception as e:
+            logger.debug(f"Failed to load task save hook: {e}")
+            return None
     
     def _clean_for_json(self, obj: Any) -> Any:
         """Clean object for JSON serialization.

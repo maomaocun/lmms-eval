@@ -9,15 +9,31 @@ Usage:
 """
 
 import argparse
+import glob
 import json
 import os
 import sys
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import List, Optional, Tuple
 
 from loguru import logger as eval_logger
 
 from lmms_eval.utils import get_eval_banner, make_table
+
+SCIVQR_SUBJECTS = ["math", "physics", "chemistry", "biology", "geography", "astronomy"]
+SCIVQR_TASKS = {"scivqr_mcq", "scivqr_open", "scivqr_reasoning"}
+SCIVQR_DEFAULT_TESTED_MODEL = "InternVL3-8B-Instruct"
+SCIVQR_DEFAULT_REASONING_PREDICTION_MODEL = "o1"
+
+
+def _normalize_judge_mode(mode: Optional[str]) -> str:
+    mode = (mode or "auto").lower()
+    if mode in {"llm", "rule", "api"}:
+        return "judge"
+    if mode in {"auto", "judge", "score"}:
+        return mode
+    return "auto"
 
 
 def add_judge_parser(subparsers):
@@ -97,7 +113,7 @@ Examples:
     parser.add_argument(
         "--mode",
         choices=["auto", "judge", "score"],
-        default="auto",
+        default=_normalize_judge_mode(os.getenv("JUDGE_MODE", "auto")),
         help=(
             "Operation mode. 'judge' runs LLM-as-judge (legacy behavior). "
             "'score' re-runs task.process_results + aggregation from saved JSONL without inference. "
@@ -110,11 +126,39 @@ Examples:
         help="Dry run without saving results",
     )
     parser.add_argument(
+        "--scivqr-reasoning-batch",
+        action="store_true",
+        default=os.getenv("SCIVQR_REASONING_BATCH", "").lower() in {"1", "true", "yes"},
+        help=(
+            "Use the official SciVQR reasoning OpenAI Batch workflow. "
+            "Writes uploads/{model}/requests_chunk*.jsonl, "
+            "results/{model}_results/output_chunk*.ndjson, and "
+            "results/{model}_results/Evaluation-Chunk*.json under --output-dir."
+        ),
+    )
+    parser.add_argument(
+        "--scivqr-split-id",
+        type=int,
+        default=int(os.getenv("SCIVQR_SPLIT_ID", "0")),
+        help="SciVQR reasoning split id for official chunked Batch evaluation.",
+    )
+    parser.add_argument(
+        "--scivqr-num-chunk",
+        type=int,
+        default=int(os.getenv("SCIVQR_NUM_CHUNK", "1")),
+        help="SciVQR reasoning total chunk count for official Batch evaluation.",
+    )
+    parser.add_argument(
+        "--scivqr-reasoning-prediction-model",
+        default=os.getenv("SCIVQR_REASONING_PREDICTION_MODEL", os.getenv("SCIVQR_TESTED_MODEL", SCIVQR_DEFAULT_REASONING_PREDICTION_MODEL)),
+        help="Prediction model directory/name used in official SciVQR reasoning uploads/results paths.",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Enable verbose logging",
     )
-    parser.set_defaults(func=run_judge)
+    parser.set_defaults(func=run_judge, subcommand="judge", judge_mode=os.getenv("JUDGE_MODE", "auto"))
 
 
 def _detect_task_from_filename(filename: str) -> str:
@@ -144,6 +188,29 @@ def _detect_task_from_filename(filename: str) -> str:
         f"Cannot auto-detect task from filename: {filename}. "
         f"Expected pattern: *_samples_{{task}}.jsonl"
     )
+
+
+def _is_scivqr_task(task_name: str) -> bool:
+    return task_name in SCIVQR_TASKS
+
+
+def _scivqr_subject_from_path(path: Path) -> Optional[str]:
+    suffix = "_results"
+    stem = path.stem
+    if stem.endswith(suffix):
+        subject = stem[: -len(suffix)]
+        if subject in SCIVQR_SUBJECTS:
+            return subject
+    return None
+
+
+def _resolve_scivqr_official_files(input_path: Path) -> List[Path]:
+    """Return official SciVQR subject result files in official script order."""
+    return [
+        input_path / f"{subject}_results.jsonl"
+        for subject in SCIVQR_SUBJECTS
+        if (input_path / f"{subject}_results.jsonl").is_file()
+    ]
 
 
 def _detect_mode_from_files(judge_items: List[Tuple[str, Path]]) -> str:
@@ -188,10 +255,17 @@ def _resolve_input_files(input_result: str, task_list: List[str]) -> List[Tuple[
 
     # Case 1: Wildcard pattern
     if "*" in input_result:
-        files = sorted(Path(".").glob(input_result))
+        files = [Path(p) for p in sorted(glob.glob(input_result))]
         if not files:
             raise ValueError(f"No files found matching pattern: {input_result}")
-        # Always auto-detect task from filename when wildcards are used
+        if task_list != ["auto-detect"]:
+            if len(task_list) != 1:
+                raise ValueError(
+                    "Wildcard input with explicit tasks supports exactly one task. "
+                    "Please use a directory for multiple tasks."
+                )
+            return [(task_list[0], f) for f in files]
+        # Auto-detect task from filename when wildcards are used without --task
         return [("auto-detect", f) for f in files]
 
     # Case 2: Single file
@@ -209,6 +283,11 @@ def _resolve_input_files(input_result: str, task_list: List[str]) -> List[Tuple[
         if task_list == ["auto-detect"]:
             files = sorted(input_path.glob("*samples_*.jsonl"))
             if not files:
+                if _resolve_scivqr_official_files(input_path):
+                    raise ValueError(
+                        f"Found SciVQR official *_results.jsonl files in {input_path}. "
+                        "Please specify --task scivqr_mcq, scivqr_open, or scivqr_reasoning."
+                    )
                 raise ValueError(f"No *samples_*.jsonl files found in directory: {input_path}")
             for f in files:
                 try:
@@ -219,6 +298,11 @@ def _resolve_input_files(input_result: str, task_list: List[str]) -> List[Tuple[
             return result
         else:
             for task in task_list:
+                if _is_scivqr_task(task):
+                    official_files = _resolve_scivqr_official_files(input_path)
+                    if official_files:
+                        result.extend((task, f) for f in official_files)
+                        continue
                 pattern = f"*samples_{task}.jsonl"
                 files = sorted(input_path.glob(pattern))
                 if not files:
@@ -233,16 +317,181 @@ def _resolve_input_files(input_result: str, task_list: List[str]) -> List[Tuple[
     raise ValueError(f"Input path not found: {input_path}")
 
 
-def _get_output_path(input_file: Path, output: Optional[str], output_dir: Optional[str]) -> Path:
+def _scivqr_tested_model() -> str:
+    return os.getenv("SCIVQR_TESTED_MODEL", SCIVQR_DEFAULT_TESTED_MODEL)
+
+
+def _scivqr_reasoning_chunk_name() -> str:
+    split_id = os.getenv("SCIVQR_SPLIT_ID", "0")
+    return f"Evaluation-Chunk{split_id}.json"
+
+
+def _get_output_path(input_file: Path, output: Optional[str], output_dir: Optional[str], task_name: Optional[str] = None) -> Path:
     """Determine output file path."""
     if output:
         return Path(output)
     if output_dir:
         out_dir = Path(output_dir)
+        if task_name == "scivqr_open":
+            out_dir = out_dir / _scivqr_tested_model()
+        elif task_name == "scivqr_reasoning":
+            out_dir.mkdir(parents=True, exist_ok=True)
+            return out_dir / _scivqr_reasoning_chunk_name()
         out_dir.mkdir(parents=True, exist_ok=True)
         return out_dir / input_file.name
     # Default: add _judged suffix
     return input_file.parent / f"{input_file.stem}_judged.jsonl"
+
+
+def _defer_scivqr_reasoning_save(task_name: str, output: Optional[str], output_dir: Optional[str], item_counts: Counter) -> bool:
+    return task_name == "scivqr_reasoning" and output is None and output_dir is not None and item_counts[task_name] > 1
+
+
+def _display_task_name(task_name: str, input_file: Path, item_counts: Counter) -> str:
+    if item_counts[task_name] <= 1:
+        return task_name
+    subject = _scivqr_subject_from_path(input_file)
+    suffix = subject if subject else input_file.stem
+    return f"{task_name}/{suffix}"
+
+
+def _expand_scivqr_subject_summary(task_name: str, summary: dict) -> dict:
+    if task_name != "scivqr_mcq":
+        return summary
+    subject_accuracy = summary.get("subject_accuracy")
+    if isinstance(subject_accuracy, dict):
+        summary = dict(summary)
+        for subject in SCIVQR_SUBJECTS:
+            if subject in subject_accuracy:
+                summary[subject] = subject_accuracy[subject]
+        summary.pop("subject_accuracy", None)
+    return summary
+
+
+def _write_scivqr_mcq_metrics_json(input_result: str, output_dir: Optional[str], summary: dict) -> None:
+    subject_accuracy = summary.get("subject_accuracy")
+    if not isinstance(subject_accuracy, dict):
+        return
+    metrics = {
+        subject: subject_accuracy[subject]
+        for subject in SCIVQR_SUBJECTS
+        if subject in subject_accuracy
+    }
+    if not metrics:
+        return
+
+    out_dir = Path(output_dir) if output_dir else Path(input_result)
+    if output_dir:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    elif not out_dir.is_dir():
+        return
+    out_file = out_dir / "metrics.json"
+    with open(out_file, "w", encoding="utf-8") as f:
+        json.dump(metrics, f)
+    eval_logger.info(f"Wrote SciVQR official metrics to {out_file}")
+
+
+def _load_jsonl_rows(path: Path) -> list:
+    rows = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                rows.append(json.loads(line))
+    return rows
+
+
+def _strip_openai_chat_completions_url(base_url: str) -> str:
+    if base_url.endswith("/chat/completions"):
+        return base_url[: -len("/chat/completions")]
+    return base_url
+
+
+def _scivqr_reasoning_batch_paths(output_dir: Optional[str], prediction_model: str, split_id: int):
+    root = Path(output_dir) if output_dir else Path(".")
+    requests_jsonl = root / "uploads" / prediction_model / f"requests_chunk{split_id}.jsonl"
+    result_ndjson = root / "results" / f"{prediction_model}_results" / f"output_chunk{split_id}.ndjson"
+    result_json = root / "results" / f"{prediction_model}_results" / f"Evaluation-Chunk{split_id}.json"
+    return requests_jsonl, result_ndjson, result_json
+
+
+def _run_scivqr_reasoning_batch(args: argparse.Namespace, judge_items: List[Tuple[str, Path]]) -> None:
+    """Run the official SciVQR reasoning OpenAI Batch workflow."""
+    from openai import OpenAI
+
+    from lmms_eval.tasks import TaskManager
+    from lmms_eval.tasks.scivqr.reasoning import utils as reasoning_utils
+
+    batch_items = []
+    for task_name, input_file in judge_items:
+        if task_name == "auto-detect":
+            task_name = _detect_task_from_filename(input_file.name)
+        if task_name != "scivqr_reasoning":
+            raise ValueError("--scivqr-reasoning-batch can only be used with --task scivqr_reasoning")
+        batch_items.append((task_name, input_file))
+
+    task_manager = TaskManager(verbosity="DEBUG" if args.verbose else "INFO")
+    task_dict = task_manager.load_task_or_group("scivqr_reasoning")
+    task = list(task_dict.values())[0]
+    if hasattr(task, "eval_docs_no_media"):
+        dataset_docs = list(task.eval_docs_no_media)
+    elif task.has_test_docs():
+        dataset_docs = list(task.test_docs())
+    else:
+        dataset_docs = list(task.validation_docs())
+
+    samples = []
+    for _task_name, input_file in batch_items:
+        subject = _scivqr_subject_from_path(input_file)
+        for row in _load_jsonl_rows(input_file):
+            if subject and not row.get("subject"):
+                row = dict(row)
+                row["subject"] = subject
+                row["__scivqr_subject_from_path"] = True
+            samples.append(row)
+
+    data = reasoning_utils.build_official_reasoning_items(samples, dataset_docs)
+    prediction_model = getattr(args, "scivqr_reasoning_prediction_model", SCIVQR_DEFAULT_REASONING_PREDICTION_MODEL)
+    split_id = getattr(args, "scivqr_split_id", int(os.getenv("SCIVQR_SPLIT_ID", "0")))
+    num_chunk = getattr(args, "scivqr_num_chunk", int(os.getenv("SCIVQR_NUM_CHUNK", "1")))
+    requests_jsonl, result_ndjson, result_json = _scivqr_reasoning_batch_paths(args.output_dir, prediction_model, split_id)
+
+    meta = reasoning_utils.write_official_reasoning_batch_requests(
+        data,
+        requests_jsonl,
+        split_id=split_id,
+        num_chunk=num_chunk,
+    )
+    eval_logger.info(
+        f"Wrote SciVQR reasoning Batch requests to {requests_jsonl} "
+        f"({len(meta['split_data'])}/{len(data)} samples)"
+    )
+
+    if args.dry_run:
+        return
+
+    api_key = args.judge_api_key or os.getenv("OPENAI_API_KEY") or ""
+    base_url = _strip_openai_chat_completions_url(args.judge_base_url or os.getenv("OPENAI_API_URL") or "")
+    client = OpenAI(api_key=api_key, base_url=base_url)
+
+    batch_id = reasoning_utils.submit_official_reasoning_batch(client, requests_jsonl)
+    eval_logger.info(f"Submitted SciVQR reasoning Batch job: {batch_id}")
+    batch = reasoning_utils.wait_for_official_reasoning_batch(
+        client,
+        batch_id,
+        interval=int(os.getenv("SCIVQR_BATCH_POLL_INTERVAL", "10")),
+    )
+    reasoning_utils.download_official_reasoning_batch_results(client, batch, result_ndjson)
+    eval_logger.info(f"Downloaded SciVQR reasoning Batch results to {result_ndjson}")
+    official_results = reasoning_utils.write_official_reasoning_results_from_ndjson(
+        meta["data"],
+        meta["id_mapping"],
+        result_ndjson,
+        result_json,
+        start=meta["start"],
+        end=meta["end"],
+    )
+    eval_logger.info(f"Wrote SciVQR official reasoning results to {result_json} ({len(official_results)} rows)")
 
 
 def _build_results_dict(task_name: str, summary: dict) -> dict:
@@ -350,9 +599,21 @@ def run_judge(args: argparse.Namespace) -> None:
     eval_logger.info(f"Found {len(judge_items)} file(s) to judge")
     for task_name, input_file in judge_items:
         eval_logger.info(f"  [{task_name}] -> {input_file}")
+    item_counts = Counter(task_name for task_name, _ in judge_items)
+
+    if getattr(args, "scivqr_reasoning_batch", False):
+        try:
+            _run_scivqr_reasoning_batch(args, judge_items)
+        except Exception as e:
+            eval_logger.error(f"SciVQR reasoning Batch evaluation failed: {e}")
+            if args.verbose:
+                import traceback
+                traceback.print_exc()
+            sys.exit(1)
+        return
 
     # Determine effective mode for auto
-    effective_mode = args.mode
+    effective_mode = _normalize_judge_mode(getattr(args, "mode", getattr(args, "judge_mode", "auto")))
     if effective_mode == "auto":
         effective_mode = _detect_mode_from_files(judge_items)
         eval_logger.info(f"Auto-detected mode: {effective_mode}")
@@ -379,6 +640,7 @@ def run_judge(args: argparse.Namespace) -> None:
     success_count = 0
     error_count = 0
     all_summaries = []
+    merged_judge_results = defaultdict(list)
 
     for task_name, input_file in judge_items:
         # Auto-detect task from filename if needed
@@ -402,11 +664,14 @@ def run_judge(args: argparse.Namespace) -> None:
                 )
                 if results_dict and task_name in results_dict.get("results", {}):
                     summary = dict(results_dict["results"][task_name])
-                    all_summaries.append((task_name, summary))
+                    display_name = _display_task_name(task_name, input_file, item_counts)
+                    all_summaries.append((display_name, summary))
                 success_count += 1
             else:
                 # Run judging
                 results = runner.judge_file(input_file, task_name)
+                if item_counts[task_name] > 1:
+                    merged_judge_results[task_name].extend(results)
 
                 # Compute summary
                 summary = runner.compute_summary(results)
@@ -423,11 +688,12 @@ def run_judge(args: argparse.Namespace) -> None:
                     eval_logger.debug(f"Task-specific aggregation failed for {task_name}: {e}")
 
                 if summary:
-                    all_summaries.append((task_name, summary))
+                    display_name = _display_task_name(task_name, input_file, item_counts)
+                    all_summaries.append((display_name, _expand_scivqr_subject_summary(task_name, summary)))
 
                 # Save results
-                if not args.dry_run:
-                    output_path = _get_output_path(input_file, args.output, args.output_dir)
+                if not args.dry_run and not _defer_scivqr_reasoning_save(task_name, args.output, args.output_dir, item_counts):
+                    output_path = _get_output_path(input_file, args.output, args.output_dir, task_name)
                     runner.save_results(results, output_path)
 
                 success_count += 1
@@ -438,6 +704,32 @@ def run_judge(args: argparse.Namespace) -> None:
                 import traceback
                 traceback.print_exc()
             error_count += 1
+
+    if effective_mode == "judge":
+        for task_name, merged_results in merged_judge_results.items():
+            if not merged_results:
+                continue
+            try:
+                summary = runner.compute_summary(merged_results)
+                try:
+                    agg = Aggregator()
+                    agg_summary = agg.aggregate(merged_results, task_name)
+                    if agg_summary:
+                        summary.update(agg_summary)
+                except Exception as e:
+                    eval_logger.debug(f"Merged task-specific aggregation failed for {task_name}: {e}")
+                metrics_summary = dict(summary)
+                display_summary = _expand_scivqr_subject_summary(task_name, summary)
+                all_summaries.append((task_name, display_summary))
+                if task_name == "scivqr_mcq" and not args.dry_run:
+                    _write_scivqr_mcq_metrics_json(args.input_result, args.output_dir, metrics_summary)
+                elif task_name == "scivqr_reasoning" and not args.dry_run and args.output is None and args.output_dir:
+                    runner._current_task_name = task_name
+                    runner._current_task = runner._load_task(task_name)
+                    output_path = _get_output_path(Path(_scivqr_reasoning_chunk_name()), args.output, args.output_dir, task_name)
+                    runner.save_results(merged_results, output_path)
+            except Exception as e:
+                eval_logger.debug(f"Merged summary failed for {task_name}: {e}")
 
     # Inject group-level summaries for hierarchical display
     def _load_group_map():

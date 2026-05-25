@@ -1,0 +1,28 @@
+dataset_path: l205/SciVQR
+task: scivqr_mcq
+tag:
+  - public_eval_qwen3_5_family
+dataset_kwargs:
+  token: True
+test_split: train
+output_type: generate_until
+doc_to_visual: !function utils.scivqr_doc_to_visual
+doc_to_text: !function utils.scivqr_doc_to_text
+doc_to_target: !function utils.scivqr_doc_to_target
+process_results: !function utils.scivqr_mcq_process_results
+
+metric_list:
+  - metric: scivqr_acc
+    aggregation: !function utils.scivqr_aggregate_accuracy
+    higher_is_better: true
+  - metric: scivqr_subject_acc
+    aggregation: !function utils.scivqr_aggregate_subject_accuracy
+    higher_is_better: true
+
+generation_kwargs:
+  max_new_tokens: 4096
+  temperature: 0
+  do_sample: False
+
+metadata:
+  version: 0.0

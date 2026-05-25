@@ -71,6 +71,24 @@ class Aggregator:
             "accuracy_func": "mmmu_pro_qwen3_official_aggregate_accuracy",
             "data_key": "mmmu_pro_acc_official",
         },
+        "scivqr_reasoning": {
+            "module": "lmms_eval.tasks.scivqr.reasoning.utils",
+            "accuracy_func": "scivqr_reasoning_aggregate_scores",
+            "data_key": "scivqr_reasoning",
+            "prefer_metrics": True,
+        },
+        "scivqr_open": {
+            "module": "lmms_eval.tasks.scivqr.utils",
+            "accuracy_func": "scivqr_standalone_aggregate_accuracy",
+            "data_key": "scivqr_open",
+            "prefer_metrics": True,
+        },
+        "scivqr_mcq": {
+            "module": "lmms_eval.tasks.scivqr.utils",
+            "accuracy_func": "scivqr_standalone_aggregate_accuracy",
+            "data_key": "scivqr_acc",
+            "prefer_metrics": True,
+        },
         "mmbench_en_dev": {
             "module": "lmms_eval.tasks.mmbench.en_utils",
             "accuracy_func": "mmbench_aggregate_dev_results_eval_standalone",
@@ -190,11 +208,14 @@ class Aggregator:
         for sample in samples:
             data_dict = None
             
+            if config.get("prefer_metrics") and "metrics" in sample and isinstance(sample["metrics"], dict):
+                if data_key in sample["metrics"]:
+                    data_dict = sample["metrics"][data_key]
             # First try top-level (where WeMath data is stored)
-            if data_key in sample:
+            if data_dict is None and data_key in sample:
                 data_dict = sample[data_key]
             # Then try nested in metrics
-            elif "metrics" in sample and isinstance(sample["metrics"], dict):
+            elif data_dict is None and "metrics" in sample and isinstance(sample["metrics"], dict):
                 if data_key in sample["metrics"]:
                     data_dict = sample["metrics"][data_key]
             

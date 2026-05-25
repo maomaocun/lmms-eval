@@ -1,0 +1,7 @@
+generation_kwargs:
+  max_new_tokens: 4096
+  temperature: 0
+  do_sample: False
+
+metadata:
+  version: 0.0
