@@ -87,9 +87,9 @@ class Huggingface(lmms):
             model_kwargs["attn_implementation"] = attn_implementation
 
         config = AutoConfig.from_pretrained(pretrained)
-        if config.model_type in AutoModelForCausalLM._model_mapping.keys():
+        if type(config) in AutoModelForCausalLM._model_mapping.keys():
             model_cls = AutoModelForCausalLM
-        elif config.model_type in AutoModelForImageTextToText._model_mapping.keys():
+        elif type(config) in AutoModelForImageTextToText._model_mapping.keys():
             model_cls = AutoModelForImageTextToText
         else:
             model_cls = AutoModel
@@ -219,6 +219,12 @@ class Huggingface(lmms):
 
             # Apply chat template
             batched_messages = [chat_message.to_hf_messages() for chat_message in chat_messages]
+            for msg_list in batched_messages:
+                for msg in msg_list:
+                    if isinstance(msg.get("content"), list):
+                        non_text = [item for item in msg["content"] if item.get("type") != "text"]
+                        if not non_text:
+                            msg["content"] = "".join(item["text"] for item in msg["content"] if item.get("type") == "text")
             texts = [self.processor.apply_chat_template(msg, tokenize=False, add_generation_prompt=True) for msg in batched_messages]
             images = []
             videos = []
